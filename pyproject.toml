@@ -1,0 +1,23 @@
+[project]
+name = "talkat"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.1.1",
+    "numpy>=2.2.6",
+    "pyaudio>=0.2.14",
+    "vosk>=0.3.45",
+]
+
+[project.scripts]
+talkat = "talkat.main:main"
+
+[tool.uv]
+dev-dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+

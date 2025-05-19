@@ -2,27 +2,15 @@ import base64
 import json
 import os
 import sys
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional
 
 import numpy as np
 from flask import Flask, request, jsonify
 
-# Add project root to sys.path to allow importing talkat.main
-# This is a bit of a hack for development; consider a proper package structure
-# or entry point for the server if this becomes a standalone runnable.
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from faster_whisper import WhisperModel
+import vosk
 
-# Attempt to import model loading utilities and config from main
-# We will refactor this later to be more modular
-try:
-    from talkat.main import load_app_config, CODE_DEFAULTS
-    # We need WhisperModel and vosk if they are to be loaded
-    from faster_whisper import WhisperModel
-    import vosk
-except ImportError as e:
-    print(f"Error importing necessary modules for model_server: {e}", file=sys.stderr)
-    print("Ensure that talkat.main and its dependencies (faster_whisper, vosk) are accessible.", file=sys.stderr)
-    sys.exit(1)
+from talkat.config import load_app_config, CODE_DEFAULTS
 
 app = Flask(__name__)
 

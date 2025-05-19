@@ -5,6 +5,9 @@ Non-streaming right now, but works pretty well.
 
 Basically nerd-dictation competitor, but I couldn't get their wacky config setup to work and wanted `uv`.
 
+hard set to English `en` right now, TODO config it.
+
+
 ## Dependencies
 - `uv`.
 - `ydotool`, `ydotoold` daemon running.
@@ -38,8 +41,15 @@ sh setup.sh
 ```
 
 # Usage
+
+## Server Setup
+This runs a server that preloads the model for faster startup.
+```
+uv run python src/talkat/model_server.py
+```
+
 ## Calibrate
-Speak during this to calibrate the mic. Right now its not great, for me I just manually set to 100.
+Speak during this to calibrate the mic. Right now its not great, for me I just manually set to 200.
 ```
 talkat calibrate
 ```
@@ -56,7 +66,7 @@ All parameters can be overriden by either CLI (priority) or `~/.config/talkat/co
 {
     "silence_threshold": 100.0,
     "model_type": "faster-whisper",
-    "model_name": "medium",
+    "model_name": "base.en",
     "faster_whisper_model_cache_dir": "/home/USERNAME/.local/share/models/faster-whisper"
 }
 ```

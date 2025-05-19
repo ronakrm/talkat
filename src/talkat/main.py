@@ -10,8 +10,10 @@ from typing import Optional, Dict, Any, Union, List
 import vosk
 from faster_whisper import WhisperModel
 import numpy as np
+import requests # Added for HTTP calls
+import base64   # Added for encoding audio data
 
-from .record import record_audio_with_vad, calibrate_microphone
+from .record import record_audio_with_vad, calibrate_microphone, stream_audio_with_vad
 
 # Configuration for threshold storage
 CONFIG_DIR = os.path.expanduser("~/.config/talkat")
@@ -95,49 +97,12 @@ def run_listen_command(
     fw_device_index: Union[int, List[int]] = 0,
     vosk_model_base_dir: str = "~/.local/share/vosk" # New parameter for Vosk model base
 ):
-    """Runs the main speech-to-text process."""
+    """Runs the main speech-to-text process by sending audio to a model server."""
     
     text = "" # Initialize text variable
-    model: Any = None # For type hinting
-    rec: Any = None   # For type hinting
-
-    if model_type == "vosk":
-        if vosk is None:
-            print("Vosk is not installed. Please install it to use Vosk models.")
-            return 1
-        # For Vosk, model_name is part of the path construction
-        vosk_model_full_path = os.path.join(os.path.expanduser(vosk_model_base_dir), model_name)
-        if not ensure_model_exists(vosk_model_full_path):
-            return 1
-        print(f"Loading Vosk model: {vosk_model_full_path}...")
-        model = vosk.Model(vosk_model_full_path)
-        rec = vosk.KaldiRecognizer(model, 16000)
-    elif model_type == "faster-whisper":
-        if WhisperModel is None or np is None:
-            print("faster-whisper or numpy is not installed. Please install them to use faster-whisper models.")
-            return 1
-        print(f"Loading faster-whisper model: {model_name}...")
-        try:
-            model_kwargs: Dict[str, Any] = {
-                "device": fw_device, 
-                "compute_type": fw_compute_type,
-                "device_index": fw_device_index
-            }
-            if model_cache_dir: # This is faster_whisper_model_cache_dir
-                print(f"Using model cache directory: {model_cache_dir}")
-                model_kwargs["download_root"] = model_cache_dir
-            else:
-                print('Using default model cache directory from huggingface.')
-            
-            model = WhisperModel(model_name, **model_kwargs)
-        except Exception as e:
-            print(f"Error loading faster-whisper model: {e}")
-            print("Make sure you have a valid faster-whisper model name (e.g., tiny.en, base, small, medium, large-v2).")
-            print("Models are downloaded automatically on first use.")
-            return 1
-    else:
-        print(f"Unsupported model type: {model_type}")
-        return 1
+    
+    # Model loading is now handled by the model_server.py
+    # We only need to prepare and send the audio data.
 
     # current_threshold = load_threshold() # Old way
     # Use the passed silence_threshold
@@ -155,54 +120,90 @@ def run_listen_command(
          print(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
     
     try:
-        result = record_audio_with_vad(silence_threshold=current_threshold, debug=True)
-        if not result:
-            print("No speech detected")
+        # --- Streaming Implementation --- 
+        # record_audio_with_vad is now expected to be a generator:
+        # 1. yields sample_rate (int)
+        # 2. yields audio_chunk (bytes) ...
+        # Stops when speech ends.
+        audio_stream_generator_func = stream_audio_with_vad(
+            silence_threshold=current_threshold, debug=True
+        )
+
+        # Get the sample rate first
+        try:
+            sample_rate = next(audio_stream_generator_func)
+            if not isinstance(sample_rate, int):
+                print("Error: record_audio_with_vad did not yield sample rate correctly.")
+                # Fallback or error out if rate is not an int (e.g. None if no speech first chunk)
+                # This also handles if the generator is empty (no speech detected from the start)
+                print("No speech detected or audio input error.")
+                try:
+                    subprocess.run(['notify-send', 'Talkat', 'No speech detected'], check=False)
+                except FileNotFoundError:
+                    pass
+                return 0 # Exit if no rate / no audio
+        except StopIteration: # Generator was empty
+            print("No speech detected (empty audio stream).")
             try:
                 subprocess.run(['notify-send', 'Talkat', 'No speech detected'], check=False)
             except FileNotFoundError:
                 pass
             return 0
-        
-        audio_data, rate = result
-        print("Processing speech...")
+
+        print(f"Speech detected. Streaming audio at {sample_rate} Hz to model server...")
         try:
-            subprocess.run(['notify-send', 'Talkat', 'Processing...'], check=False)
+            subprocess.run(['notify-send', 'Talkat', 'Streaming to server...'], check=False)
         except FileNotFoundError:
             pass
+
+        def request_data_generator():
+            # First, send metadata as a JSON string line
+            metadata = {"rate": sample_rate}
+            yield json.dumps(metadata).encode('utf-8') + b'\n'
+            # Then, stream audio chunks from the modified record_audio_with_vad
+            for audio_chunk in audio_stream_generator_func:
+                if audio_chunk: # Ensure not None or empty bytes if VAD yields such
+                    yield audio_chunk
         
-        if model_type == "vosk":
-            # Process audio in chunks for Vosk
-            chunk_size = 4000
-            for i in range(0, len(audio_data), chunk_size):
-                chunk = audio_data[i:i+chunk_size]
-                if rec.AcceptWaveform(chunk):
-                    pass
-            # Get final result from Vosk
-            final_result_json = rec.FinalResult()
-            text_result = json.loads(final_result_json)
-            text = text_result.get('text', '').strip()
-        
-        elif model_type == "faster-whisper":
-            # Convert audio_data (bytes) to NumPy array of floats for faster-whisper
-            # Assuming audio_data is 16-bit PCM
-            if not audio_data:
-                print("No audio data to process.")
-            else:
-                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-                assert isinstance(model, WhisperModel) # Clarify type for linter
-                segments, info = model.transcribe(audio_np, beam_size=5)
-                print(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
-                
-                recognized_texts = []
-                for segment in segments:
-                    recognized_texts.append(segment.text)
-                text = "".join(recognized_texts).strip()
+        server_url = "http://127.0.0.1:5555/transcribe_stream" # New streaming endpoint
+        try:
+            # Increased timeout for potentially long streaming and server processing
+            response = requests.post(server_url, data=request_data_generator(), timeout=120) # type: ignore[arg-type]
+            response.raise_for_status()
+            
+            response_json = response.json()
+            text = response_json.get('text', '').strip()
+            
+        except requests.exceptions.ConnectionError:
+            print(f"Error: Could not connect to the model server at {server_url}.")
+            print("Please ensure the model server is running: python -m src.talkat.model_server")
+            try:
+                subprocess.run(['notify-send', 'Talkat', 'Error: Model server not reachable.'], check=False)
+            except FileNotFoundError:
+                pass
+            return 1
+        except requests.exceptions.Timeout:
+            print(f"Error: Request to model server timed out.")
+            try:
+                subprocess.run(['notify-send', 'Talkat', 'Error: Model server timeout.'], check=False)
+            except FileNotFoundError:
+                pass
+            return 1
+        except requests.exceptions.RequestException as e:
+            print(f"Error communicating with model server: {e}")
+            try:
+                subprocess.run(['notify-send', 'Talkat', f'Server communication error: {e}'], check=False)
+            except FileNotFoundError:
+                pass
+            return 1
+        except json.JSONDecodeError:
+            print(f"Error: Could not decode JSON response from server: {response.text}")
+            return 1
 
         if text:
             print(f"Recognized: {text}")
             try:
-                subprocess.run(['ydotool', 'type', text], check=True)
+                subprocess.run(['ydotool', 'type', '--key-delay=1', text], check=True)
                 print(f"Typed: {text}")
                 try:
                     subprocess.run(['notify-send', 'Talkat', f'Typed: {text}'], check=False)

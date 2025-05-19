@@ -26,6 +26,7 @@ CODE_DEFAULTS: Dict[str, Any] = {
     "fw_device": "cpu",
     "fw_compute_type": "int8",
     "fw_device_index": 0,  # As per user's latest change: model_kwargs["device_index"] = 0
+    "vosk_model_base_dir": "~/.local/share/vosk", # New default for Vosk model base
 }
 
 def load_app_config() -> Dict[str, Any]:
@@ -91,7 +92,8 @@ def run_listen_command(
     model_cache_dir: Optional[str] = None,
     fw_device: str = "cpu",
     fw_compute_type: str = "int8",
-    fw_device_index: Union[int, List[int]] = 0
+    fw_device_index: Union[int, List[int]] = 0,
+    vosk_model_base_dir: str = "~/.local/share/vosk" # New parameter for Vosk model base
 ):
     """Runs the main speech-to-text process."""
     
@@ -104,11 +106,11 @@ def run_listen_command(
             print("Vosk is not installed. Please install it to use Vosk models.")
             return 1
         # For Vosk, model_name is part of the path construction
-        vosk_model_path = os.path.expanduser(f"~/.local/share/vosk/{model_name}")
-        if not ensure_model_exists(vosk_model_path):
+        vosk_model_full_path = os.path.join(os.path.expanduser(vosk_model_base_dir), model_name)
+        if not ensure_model_exists(vosk_model_full_path):
             return 1
-        print(f"Loading Vosk model: {vosk_model_path}...")
-        model = vosk.Model(vosk_model_path)
+        print(f"Loading Vosk model: {vosk_model_full_path}...")
+        model = vosk.Model(vosk_model_full_path)
         rec = vosk.KaldiRecognizer(model, 16000)
     elif model_type == "faster-whisper":
         if WhisperModel is None or np is None:
@@ -253,6 +255,9 @@ def main():
     parser.add_argument('--silence_threshold', type=float,
                         default=initial_config.get('silence_threshold'),
                         help='Silence threshold for VAD.')
+    parser.add_argument('--vosk_model_base_dir', type=str,
+                        default=initial_config.get('vosk_model_base_dir'),
+                        help='Base directory for Vosk models.')
     
     # Faster-whisper specific arguments
     parser.add_argument('--faster_whisper_model_cache_dir', type=str, 
@@ -314,7 +319,8 @@ def main():
             model_cache_dir=args.faster_whisper_model_cache_dir,
             fw_device=args.fw_device,
             fw_compute_type=args.fw_compute_type,
-            fw_device_index=args.fw_device_index
+            fw_device_index=args.fw_device_index,
+            vosk_model_base_dir=args.vosk_model_base_dir
         )
     else:
         parser.print_help()

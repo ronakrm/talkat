@@ -203,7 +203,7 @@ def run_listen_command(
         if text:
             print(f"Recognized: {text}")
             try:
-                subprocess.run(['ydotool', 'type', text], check=True)
+                subprocess.run(['ydotool', 'type', '--key-delay=1', text], check=True)
                 print(f"Typed: {text}")
                 try:
                     subprocess.run(['notify-send', 'Talkat', f'Typed: {text}'], check=False)

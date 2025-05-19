@@ -231,8 +231,9 @@ def transcribe_audio_stream():
             else:
                 # Convert accumulated audio_bytes to NumPy array of floats
                 audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                audio_np = np.ascontiguousarray(audio_np, dtype=np.float32)
                 # beam_size from main.py default, consider making it configurable for stream if needed
-                segments, info = MODEL.transcribe(audio_np, beam_size=5) 
+                segments, info = MODEL.transcribe(audio_np, language="en", beam_size=3, best_of=3) 
                 # print(f"Streamed: Detected language '{info.language}' with probability {info.language_probability:.2f}")
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()

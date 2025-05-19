@@ -48,6 +48,8 @@ KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
 # Add ydotoold to your Wayland compositor startup
 # For Sway, add to your config:
 # exec --no-startup-id ydotoold
+# For Niri, add to your config:
+# spawn-at-startup "ydotoold"
 ```
 
 2. Clone and install Talkat:
@@ -71,24 +73,20 @@ The model server runs automatically in the background after installation. You ca
 talkat listen
 ```
 
+### Create Shortcut
+Bind `talkat listen` to some shortcut, e.g., for Niri:
+```
+Mod+Apostrophe { spawn "bash" "-c" "talkat listen"; }
+```
+
 - Calibrate your microphone (speak during this to set the silence threshold):
 ```bash
 talkat calibrate
 ```
 
-- Check server status:
+- Check server status, start/stop/enable/disable the server:
 ```bash
 systemctl status talkat
-```
-
-- Stop the server:
-```bash
-systemctl stop talkat
-```
-
-- Start the server:
-```bash
-systemctl start talkat
 ```
 
 ## Configuration
@@ -104,16 +102,8 @@ Example configuration:
 {
     "silence_threshold": 100.0,
     "model_type": "faster-whisper",
-    "model_name": "base.en",
-    "faster_whisper_model_cache_dir": "/home/USERNAME/.local/share/models/faster-whisper"
+    "model_name": "large.v3",
 }
-```
-
-## Development
-
-To run the server manually for development:
-```bash
-talkat server
 ```
 
 ## How It Works

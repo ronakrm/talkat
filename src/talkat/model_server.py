@@ -169,6 +169,84 @@ def transcribe_audio():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+@app.route('/transcribe_stream', methods=['POST'])
+def transcribe_audio_stream():
+    global MODEL, MODEL_TYPE # MODEL_REC is not used here as we create a local one for Vosk streams
+    if not MODEL:
+        return jsonify({"error": "Model not loaded"}), 500
+
+    try:
+        # Read the first line for metadata (JSON)
+        # request.stream is suitable for this.
+        metadata_line = request.stream.readline()
+        if not metadata_line:
+            return jsonify({"error": "Missing metadata line in stream"}), 400
+        
+        try:
+            metadata_str = metadata_line.decode('utf-8').strip()
+            metadata = json.loads(metadata_str)
+            rate = int(metadata['rate'])
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            return jsonify({"error": f"Invalid or missing metadata: {e}"}), 400
+
+        text_result = ""
+
+        if MODEL_TYPE == "vosk":
+            if vosk is None: # Should have been checked at init, but good practice
+                return jsonify({"error": "Vosk library not available"}), 500
+            
+            # Create a new recognizer for this stream for proper isolation
+            local_vosk_recognizer = vosk.KaldiRecognizer(MODEL, rate)
+            
+            # Process audio chunks from the rest of the stream
+            while True:
+                chunk = request.stream.read(4096) # Read in chunks
+                if not chunk:
+                    break # End of stream
+                # local_vosk_recognizer.AcceptWaveform(chunk)
+                if local_vosk_recognizer.AcceptWaveform(chunk):
+                    # Optionally, could use PartialResult for intermediate feedback
+                    # For now, we wait for FinalResult
+                    pass
+
+            final_json = local_vosk_recognizer.Result()
+            result_dict = json.loads(final_json)
+            text_result = result_dict.get('text', '').strip()
+
+        elif MODEL_TYPE == "faster-whisper":
+            if not isinstance(MODEL, WhisperModel): # Type check
+                return jsonify({"error": "Faster-whisper model not correctly loaded"}), 500
+
+            audio_buffer = bytearray()
+            while True:
+                chunk = request.stream.read(4096)
+                if not chunk:
+                    break
+                audio_buffer.extend(chunk)
+            
+            audio_bytes = bytes(audio_buffer)
+
+            if not audio_bytes:
+                text_result = ""
+            else:
+                # Convert accumulated audio_bytes to NumPy array of floats
+                audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                # beam_size from main.py default, consider making it configurable for stream if needed
+                segments, info = MODEL.transcribe(audio_np, beam_size=5) 
+                # print(f"Streamed: Detected language '{info.language}' with probability {info.language_probability:.2f}")
+                recognized_texts = [segment.text for segment in segments]
+                text_result = "".join(recognized_texts).strip()
+        else:
+            return jsonify({"error": f"Unsupported model type configured on server: {MODEL_TYPE}"}), 500
+
+        return jsonify({"text": text_result})
+
+    except Exception as e:
+        print(f"Error during streaming transcription: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health_check():
     # Basic health check

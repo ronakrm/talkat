@@ -13,7 +13,7 @@ import numpy as np
 import requests # Added for HTTP calls
 import base64   # Added for encoding audio data
 
-from .record import record_audio_with_vad, calibrate_microphone
+from .record import record_audio_with_vad, calibrate_microphone, stream_audio_with_vad
 
 # Configuration for threshold storage
 CONFIG_DIR = os.path.expanduser("~/.config/talkat")
@@ -120,37 +120,56 @@ def run_listen_command(
          print(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
     
     try:
-        result = record_audio_with_vad(silence_threshold=current_threshold, debug=True)
-        if not result:
-            print("No speech detected")
+        # --- Streaming Implementation --- 
+        # record_audio_with_vad is now expected to be a generator:
+        # 1. yields sample_rate (int)
+        # 2. yields audio_chunk (bytes) ...
+        # Stops when speech ends.
+        audio_stream_generator_func = stream_audio_with_vad(
+            silence_threshold=current_threshold, debug=True
+        )
+
+        # Get the sample rate first
+        try:
+            sample_rate = next(audio_stream_generator_func)
+            if not isinstance(sample_rate, int):
+                print("Error: record_audio_with_vad did not yield sample rate correctly.")
+                # Fallback or error out if rate is not an int (e.g. None if no speech first chunk)
+                # This also handles if the generator is empty (no speech detected from the start)
+                print("No speech detected or audio input error.")
+                try:
+                    subprocess.run(['notify-send', 'Talkat', 'No speech detected'], check=False)
+                except FileNotFoundError:
+                    pass
+                return 0 # Exit if no rate / no audio
+        except StopIteration: # Generator was empty
+            print("No speech detected (empty audio stream).")
             try:
                 subprocess.run(['notify-send', 'Talkat', 'No speech detected'], check=False)
             except FileNotFoundError:
                 pass
             return 0
-        
-        audio_data, rate = result
-        print("Speech detected. Sending to model server...")
-        
+
+        print(f"Speech detected. Streaming audio at {sample_rate} Hz to model server...")
         try:
-            subprocess.run(['notify-send', 'Talkat', 'Sending to server...'], check=False)
+            subprocess.run(['notify-send', 'Talkat', 'Streaming to server...'], check=False)
         except FileNotFoundError:
             pass
 
-        # Encode audio data to Base64
-        audio_data_b64 = base64.b64encode(audio_data).decode('utf-8')
+        def request_data_generator():
+            # First, send metadata as a JSON string line
+            metadata = {"rate": sample_rate}
+            yield json.dumps(metadata).encode('utf-8') + b'\n'
+            # Then, stream audio chunks from the modified record_audio_with_vad
+            for audio_chunk in audio_stream_generator_func:
+                if audio_chunk: # Ensure not None or empty bytes if VAD yields such
+                    yield audio_chunk
         
-        payload = {
-            "audio_data_b64": audio_data_b64,
-            "rate": rate
-        }
-        
-        # Send data to the model server
-        # The server determines the model type based on its own config
-        server_url = "http://127.0.0.1:5555/transcribe"
+        server_url = "http://127.0.0.1:5555/transcribe_stream" # New streaming endpoint
         try:
-            response = requests.post(server_url, json=payload, timeout=20) # 20s timeout
-            response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+            # Increased timeout for potentially long streaming and server processing
+            response = requests.post(server_url, data=request_data_generator(), timeout=120) # type: ignore[arg-type]
+            response.raise_for_status()
             
             response_json = response.json()
             text = response_json.get('text', '').strip()

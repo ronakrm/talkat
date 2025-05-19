@@ -244,11 +244,9 @@ def health_check():
     else:
         return jsonify({"status": "error", "message": "Model not loaded"}), 500
 
-if __name__ == '__main__':
-    initialize_model() # Load the model when the server starts
-    if not MODEL:
-        print("Model could not be initialized. Exiting server.", file=sys.stderr)
-        sys.exit(1)
-        
-    print(f"Starting Flask server for Talkat model on port 5555...")
-    app.run(host='127.0.0.1', port=5555, debug=False) # debug=False for production/background 
+def main():
+    initialize_model()
+    app.run(host='127.0.0.1', port=5555)
+
+if __name__ == "__main__":
+    main() 

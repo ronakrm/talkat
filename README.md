@@ -2,14 +2,6 @@
 
 A voice command system with local model server for privacy and offline use. Talkat allows you to speak into any keyboard input in a Wayland-based compositor, similar to nerd-dictation but with a simpler setup.
 
-## Features
-
-- Local voice command processing
-- Support for both Vosk and Faster-Whisper models
-- Background model server for efficient resource usage
-- Simple command-line interface
-- Wayland integration via ydotool
-
 ## System Requirements
 
 - Linux with Wayland compositor (Sway, Niri, etc.)

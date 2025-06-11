@@ -227,7 +227,8 @@ def stream_audio_with_vad(
     silence_threshold: Optional[float] = None, 
     silence_duration: float = 2.0, 
     debug: bool = True,
-    chunk_size_ms: int = 30 # VAD works well with 10, 20, or 30ms frames
+    chunk_size_ms: int = 30, # VAD works well with 10, 20, or 30ms frames
+    max_duration: Optional[float] = 30.0  # None for unlimited
 ) -> Generator[Union[int, bytes], None, None]:
     """Record audio with VAD and yield it in chunks as a generator.
     First yields the sample rate (int), then yields audio data (bytes).
@@ -241,7 +242,7 @@ def stream_audio_with_vad(
 
     # VAD Configuration
     PRE_SPEECH_PADDING_DURATION = 0.3  # Seconds of audio to keep before speech starts
-    MAX_RECORDING_DURATION_SECONDS = 30 # Overall timeout for listening
+    MAX_RECORDING_DURATION_SECONDS = max_duration if max_duration is not None else float('inf')
 
     if silence_threshold is None:
         print("Warning: silence_threshold not provided to stream_audio_with_vad. Using a default fallback.")
@@ -292,7 +293,10 @@ def stream_audio_with_vad(
     silent_chunks_count = 0
     max_silent_chunks_to_stop = int(silence_duration * RATE / CHUNK_SAMPLES)
     
-    max_total_chunks = int(MAX_RECORDING_DURATION_SECONDS * RATE / CHUNK_SAMPLES)
+    if MAX_RECORDING_DURATION_SECONDS == float('inf'):
+        max_total_chunks = float('inf')
+    else:
+        max_total_chunks = int(MAX_RECORDING_DURATION_SECONDS * RATE / CHUNK_SAMPLES)
     total_chunks_processed = 0
     speech_has_started_and_padded = False
     

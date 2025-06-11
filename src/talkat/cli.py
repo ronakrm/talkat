@@ -13,6 +13,9 @@ def main():
     # Client mode (listen)
     listen_parser = subparsers.add_parser("listen", help="Start listening for voice commands")
     
+    # Long dictation mode
+    long_parser = subparsers.add_parser("long", help="Start long dictation mode (continuous recording)")
+    
     # Server mode
     server_parser = subparsers.add_parser("server", help="Start the model server")
 
@@ -20,6 +23,8 @@ def main():
 
     if args.command == "listen":
         client_main()
+    elif args.command == "long":
+        client_main(mode="long")
     elif args.command == "server":
         server_main()
     else:

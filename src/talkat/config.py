@@ -17,6 +17,9 @@ CODE_DEFAULTS: Dict[str, Any] = {
     "fw_compute_type": "int8",
     "fw_device_index": 0,
     "vosk_model_base_dir": os.path.expanduser("~/.cache/talkat/vosk"),
+    "clipboard_on_long": True,
+    "save_transcripts": True,
+    "transcript_dir": os.path.expanduser("~/.local/share/talkat/transcripts"),
 }
 
 def load_app_config() -> Dict[str, Any]:

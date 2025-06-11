@@ -5,6 +5,9 @@ import subprocess
 import os
 import sys
 import argparse
+import time
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, Union, List
 
 import vosk
@@ -15,6 +18,90 @@ import base64   # Added for encoding audio data
 
 from .record import record_audio_with_vad, calibrate_microphone, stream_audio_with_vad
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
+
+def get_transcript_dir() -> Path:
+    """Get or create the transcript directory."""
+    config = load_app_config()
+    transcript_dir_str = config.get('transcript_dir', os.path.expanduser("~/.local/share/talkat/transcripts"))
+    transcript_dir = Path(os.path.expanduser(transcript_dir_str))
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    return transcript_dir
+
+def save_transcript(text: str, mode: str = "short") -> Path:
+    """Save transcript to a file with timestamp."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{timestamp}_{mode}.txt"
+    filepath = get_transcript_dir() / filename
+    
+    with open(filepath, 'a', encoding='utf-8') as f:
+        f.write(text + '\n')
+    
+    return filepath
+
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard using wl-copy or xclip."""
+    # Try wl-copy first (Wayland)
+    try:
+        subprocess.run(['wl-copy'], input=text.encode('utf-8'), check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    
+    # Try xclip as fallback (X11)
+    try:
+        subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode('utf-8'), check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    
+    return False
+
+def postprocess_transcript(transcript_path: Path, processor_command: Optional[str] = None) -> Optional[str]:
+    """
+    Postprocess a transcript file using an external command or LLM interface.
+    
+    This is a placeholder for future functionality. The idea is to:
+    1. Read the transcript file
+    2. Pass it to a processor command (e.g., an LLM CLI tool)
+    3. Return the processed output
+    
+    Example processor commands could be:
+    - "llm prompt 'Clean up this transcript and format it as bullet points'"
+    - "gpt-cli --system 'You are a helpful assistant' --prompt 'Summarize this text'"
+    - Custom scripts that interface with local or remote LLMs
+    
+    The processor command should accept text via stdin and output to stdout.
+    
+    Future config options could include:
+    - postprocess_enabled: bool
+    - postprocess_command: str (the command to run)
+    - postprocess_auto: bool (automatically process after dictation)
+    - postprocess_prompts: dict (predefined prompts for different use cases)
+    """
+    if not processor_command:
+        return None
+    
+    # Read the transcript
+    try:
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            transcript_text = f.read()
+    except IOError:
+        return None
+    
+    # This would be implemented when needed:
+    # try:
+    #     result = subprocess.run(
+    #         processor_command,
+    #         input=transcript_text.encode('utf-8'),
+    #         capture_output=True,
+    #         shell=True,
+    #         check=True
+    #     )
+    #     return result.stdout.decode('utf-8')
+    # except subprocess.CalledProcessError:
+    #     return None
+    
+    return None
 
 def ensure_model_exists(model_path: str) -> bool:
     """Checks if the Vosk model exists and prints messages if not."""
@@ -160,6 +247,13 @@ def run_listen_command(
 
         if text:
             print(f"Recognized: {text}")
+            
+            # Save transcript for short mode if enabled
+            config = load_app_config()
+            if config.get('save_transcripts', True):
+                transcript_path = save_transcript(text, mode="short")
+                print(f"Transcript saved to: {transcript_path}")
+            
             try:
                 subprocess.run(['ydotool', 'type', '--key-delay=1', text], check=True)
                 print(f"Typed: {text}")
@@ -193,14 +287,158 @@ def run_listen_command(
             pass
         return 1
 
-def main():
+def run_long_dictation_command(
+    model_type: str, 
+    model_name: str, 
+    silence_threshold: float,
+    model_cache_dir: Optional[str] = None,
+    fw_device: str = "cpu",
+    fw_compute_type: str = "int8",
+    fw_device_index: Union[int, List[int]] = 0,
+    vosk_model_base_dir: str = "~/.local/share/vosk",
+    clipboard: bool = True
+):
+    """Runs long dictation mode with continuous speech recognition."""
+    
+    # Use the passed silence_threshold
+    current_threshold = silence_threshold
+    if current_threshold == CODE_DEFAULTS['silence_threshold']:
+        loaded_file_conf_val = load_app_config().get('silence_threshold')
+        if loaded_file_conf_val != CODE_DEFAULTS['silence_threshold']:
+             print(f"Using calibrated threshold from config: {current_threshold:.1f}")
+        else:
+            print(f"No calibrated threshold found in config or CLI. Using default: {current_threshold:.1f}")
+            print(f"Run 'talkat calibrate' to set a custom threshold.")
+    else:
+         print(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
+    
+    # Create a single transcript file for this session
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    transcript_filename = f"{timestamp}_long.txt"
+    transcript_dir = get_transcript_dir()
+    transcript_path = transcript_dir / transcript_filename
+    
+    print(f"Starting long dictation mode. Press Ctrl+C to stop.")
+    print(f"Transcript directory: {transcript_dir}")
+    print(f"Transcript will be saved to: {transcript_path}")
+    
+    # Create empty file to ensure it exists
+    transcript_path.touch()
+    
+    if clipboard:
+        print("Transcript will be copied to clipboard when finished.")
+    
+    try:
+        subprocess.run(['notify-send', 'Talkat', 'Long dictation mode started. Press Ctrl+C to stop.'], check=False)
+    except FileNotFoundError:
+        pass
+    
+    full_transcript = []
+    
+    try:
+        while True:  # Continue until interrupted
+            # Use the existing stream_audio_with_vad for each utterance
+            audio_stream_generator_func = stream_audio_with_vad(
+                silence_threshold=current_threshold, 
+                debug=False,  # Less verbose for continuous mode
+                max_duration=None  # No timeout for long mode
+            )
+
+            # Get the sample rate first
+            try:
+                sample_rate = next(audio_stream_generator_func)
+                if not isinstance(sample_rate, int):
+                    print("Error: stream_audio_with_vad did not yield sample rate correctly.")
+                    continue  # Try again for next utterance
+            except StopIteration:
+                # No speech detected in this cycle, wait a bit and try again
+                time.sleep(0.1)
+                continue
+
+            # Collect audio data for this utterance
+            def request_data_generator():
+                # First, send metadata as a JSON string line
+                metadata = {"rate": sample_rate}
+                yield json.dumps(metadata).encode('utf-8') + b'\n'
+                # Then, stream audio chunks
+                for audio_chunk in audio_stream_generator_func:
+                    if audio_chunk:
+                        yield audio_chunk
+            
+            server_url = "http://127.0.0.1:5555/transcribe_stream"
+            try:
+                response = requests.post(server_url, data=request_data_generator(), timeout=120)
+                response.raise_for_status()
+                
+                response_json = response.json()
+                text = response_json.get('text', '').strip()
+                
+                if text:
+                    print(f"Recognized: {text}")
+                    full_transcript.append(text)
+                    
+                    # Save to file immediately
+                    with open(transcript_path, 'a', encoding='utf-8') as f:
+                        f.write(text + ' ')
+                    
+                    # Don't type in long dictation mode
+                    print("(Saved to transcript)")
+                
+            except requests.exceptions.ConnectionError:
+                print(f"Error: Could not connect to the model server at {server_url}.")
+                print("Please ensure the model server is running: talkat server")
+                try:
+                    subprocess.run(['notify-send', 'Talkat', 'Error: Model server not reachable.'], check=False)
+                except FileNotFoundError:
+                    pass
+                return 1
+            except requests.exceptions.RequestException as e:
+                print(f"Error communicating with model server: {e}")
+                continue  # Try next utterance
+            except json.JSONDecodeError:
+                print(f"Error: Could not decode JSON response from server")
+                continue  # Try next utterance
+                
+    except KeyboardInterrupt:
+        print("\nLong dictation mode stopped.")
+        
+        # Join all transcript parts
+        full_text = ' '.join(full_transcript)
+        
+        if full_text and clipboard:
+            if copy_to_clipboard(full_text):
+                print("Transcript copied to clipboard!")
+                try:
+                    subprocess.run(['notify-send', 'Talkat', 'Transcript copied to clipboard'], check=False)
+                except FileNotFoundError:
+                    pass
+            else:
+                print("Could not copy to clipboard (wl-copy or xclip not available)")
+        
+        print(f"Full transcript saved to: {transcript_path}")
+        print(f"Total words: {len(full_text.split())}")
+        
+        try:
+            subprocess.run(['notify-send', 'Talkat', f'Long dictation stopped. Saved to {transcript_filename}'], check=False)
+        except FileNotFoundError:
+            pass
+        return 0
+    except Exception as e:
+        print(f"Error in long dictation mode: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def main(mode="listen"):
     # Load config (defaults updated by file)
     initial_config = load_app_config()
 
     parser = argparse.ArgumentParser(description="Talkat: Speech-to-text utility.",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
-    parser.add_argument('command', nargs='?', default='listen', choices=['listen', 'calibrate'], 
+    # Set default command based on mode
+    default_command = 'listen' if mode == 'listen' else 'long'
+    parser.add_argument('command', nargs='?', default=default_command, choices=['listen', 'calibrate', 'long'], 
                         help='Command to run.')
 
     # Set defaults for argparse from the loaded configuration
@@ -247,6 +485,15 @@ def main():
                         type=parse_device_index_str, # Converts CLI string to int or List[int]
                         default=initial_config.get('fw_device_index'), # Actual default value, not a string
                         help='Device index for faster-whisper (e.g., 0 or "0,1" for multi-GPU).')
+    
+    # Transcript and clipboard arguments
+    parser.add_argument('--no-clipboard', action='store_true',
+                        help='Disable clipboard copy for long dictation mode.')
+    parser.add_argument('--no-save-transcripts', action='store_true',
+                        help='Disable saving transcripts to files.')
+    parser.add_argument('--transcript-dir', type=str,
+                        default=initial_config.get('transcript_dir'),
+                        help='Directory to save transcripts.')
 
 
     args = parser.parse_args()
@@ -280,6 +527,21 @@ def main():
             fw_compute_type=args.fw_compute_type,
             fw_device_index=args.fw_device_index,
             vosk_model_base_dir=args.vosk_model_base_dir
+        )
+    elif args.command == 'long':
+        # Determine clipboard setting
+        clipboard_enabled = initial_config.get('clipboard_on_long', True) and not args.no_clipboard
+        
+        return run_long_dictation_command(
+            model_type=args.model_type,
+            model_name=args.model_name,
+            silence_threshold=args.silence_threshold,
+            model_cache_dir=args.faster_whisper_model_cache_dir,
+            fw_device=args.fw_device,
+            fw_compute_type=args.fw_compute_type,
+            fw_device_index=args.fw_device_index,
+            vosk_model_base_dir=args.vosk_model_base_dir,
+            clipboard=clipboard_enabled
         )
     else:
         parser.print_help()

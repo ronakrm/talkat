@@ -1,9 +1,16 @@
 #!/bin/bash
-# Setup script for talkat
+# Setup script for talkat - handles both installation and updates
 
 set -e
 
-echo "Setting up talkat..."
+# Detect if this is an update or fresh install
+if [ -d "/opt/talkat" ]; then
+    echo "Updating existing talkat installation..."
+    IS_UPDATE=true
+else
+    echo "Setting up talkat for the first time..."
+    IS_UPDATE=false
+fi
 
 # Check if running as root for systemd service installation
 if [ "$EUID" -ne 0 ]; then 
@@ -18,10 +25,18 @@ if ! command -v uv &> /dev/null; then
     source ~/.bashrc
 fi
 
-# Create application directory
+# Create/update application directory
 APP_DIR="/opt/talkat"
-echo "Creating application directory at $APP_DIR..."
-mkdir -p "$APP_DIR"
+if [ "$IS_UPDATE" = true ]; then
+    echo "Updating application files at $APP_DIR..."
+    # Stop the service before updating
+    systemctl stop talkat || true
+else
+    echo "Creating application directory at $APP_DIR..."
+    mkdir -p "$APP_DIR"
+fi
+
+# Copy all files (works for both install and update)
 cp -r ./* "$APP_DIR/"
 
 # Install dependencies
@@ -29,9 +44,10 @@ echo "Installing Python dependencies..."
 cd "$APP_DIR"
 uv sync
 
-# Create systemd service
-echo "Creating systemd service..."
-cat > /etc/systemd/system/talkat.service << EOF
+# Create systemd service (only if it doesn't exist or if fresh install)
+if [ ! -f /etc/systemd/system/talkat.service ] || [ "$IS_UPDATE" = false ]; then
+    echo "Creating systemd service..."
+    cat > /etc/systemd/system/talkat.service << EOF
 [Unit]
 Description=Talkat Model Server
 After=network.target
@@ -47,6 +63,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 # Create client wrapper script
 echo "Creating client wrapper script..."
@@ -64,11 +81,27 @@ systemctl daemon-reload
 systemctl enable talkat
 systemctl start talkat
 
-echo "Setup complete!"
-echo "The model server is now running as a systemd service."
-echo "You can use the following commands:"
-echo "  - talkat listen    # Start listening for voice input"
-echo "  - talkat server    # Start the model server manually (if needed)"
-echo "  - systemctl status talkat    # Check service status"
-echo "  - systemctl stop talkat      # Stop the service"
-echo "  - systemctl start talkat     # Start the service"
+if [ "$IS_UPDATE" = true ]; then
+    echo ""
+    echo "Update complete!"
+    echo "The talkat service has been restarted with the latest changes."
+else
+    echo ""
+    echo "Setup complete!"
+    echo "The model server is now running as a systemd service."
+fi
+
+echo ""
+echo "Available commands:"
+echo "  - talkat listen     # Start short dictation (types to screen)"
+echo "  - talkat long       # Start long dictation (saves to file)"
+echo "  - talkat calibrate  # Calibrate microphone threshold"
+echo "  - talkat server     # Start the model server manually (if needed)"
+echo ""
+echo "Service management:"
+echo "  - systemctl status talkat   # Check service status"
+echo "  - systemctl restart talkat  # Restart the service"
+echo "  - systemctl stop talkat     # Stop the service"
+echo "  - systemctl start talkat    # Start the service"
+echo ""
+echo "Transcripts are saved to: ~/.local/share/talkat/transcripts/"

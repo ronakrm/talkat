@@ -15,6 +15,7 @@ A voice command system with local model server for privacy and offline use. Talk
 - `ydotool` and `ydotoold` for Wayland input simulation
 - `notify-send` for notifications (optional)
 - `uv` for Python package management
+- `wl-copy` (wl-clipboard) or `xclip` for clipboard support (optional)
 
 ### Python Dependencies
 - faster-whisper
@@ -48,7 +49,7 @@ KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
 ```bash
 git clone https://github.com/yourusername/talkat.git
 cd talkat
-sudo ./setup.sh
+sudo ./setup.sh # sudo for setting up system daemons/processes
 ```
 
 The setup script will:
@@ -56,29 +57,56 @@ The setup script will:
 - Set up the model server as a systemd service, and download the `base.en` `faster-whisper` model.
 - Create the `talkat` command-line tool
 
+### Updating/Upgrading
+
+To update talkat with the latest changes from the repository:
+```bash
+cd talkat
+git pull
+sudo ./setup.sh
+```
+
+The setup script automatically handles both fresh installations and updates.
+
 ## Usage
 
 The model server runs automatically in the background after installation. You can use the following commands:
 
-- Start listening for voice commands:
+### Short Dictation Mode
+Start listening for voice commands (types to screen and saves transcript):
 ```bash
 talkat listen
 ```
 
-### Create Shortcut
-Bind `talkat listen` to some shortcut, e.g., for Niri:
-```
-Mod+Apostrophe { spawn "bash" "-c" "talkat listen"; }
+### Long Dictation Mode
+Continuous dictation that saves to file without typing to screen:
+```bash
+talkat long              # Saves to file and copies to clipboard on exit
+talkat long --no-clipboard   # Saves to file only
 ```
 
+Long dictation mode:
+- Continues recording until you press Ctrl+C
+- Saves transcript to `~/.local/share/talkat/transcripts/`
+- Automatically copies full transcript to clipboard when stopped (unless --no-clipboard is used)
+- No timeout - perfect for long-form dictation, note-taking, or transcription
+
+### Other Commands
 - Calibrate your microphone (speak during this to set the silence threshold):
 ```bash
 talkat calibrate
 ```
 
-- Check server status, start/stop/enable/disable the server:
+- Check server status:
 ```bash
 systemctl status talkat
+```
+
+### Create Shortcuts
+Bind commands to keyboard shortcuts, e.g., for Niri:
+```
+Mod+Apostrophe { spawn "bash" "-c" "talkat listen"; }
+Mod+Shift+Apostrophe { spawn "bash" "-c" "talkat long"; }
 ```
 
 ## Configuration
@@ -88,6 +116,7 @@ The configuration file is located at `~/.config/talkat/config.json`. You can mod
 - Adjust model parameters
 - Configure audio settings
 - Change the model cache location (default `~/.cache/talkat`)
+- Configure transcript saving and clipboard behavior
 
 Example configuration:
 ```json
@@ -95,8 +124,18 @@ Example configuration:
     "silence_threshold": 100.0,
     "model_type": "faster-whisper",
     "model_name": "large.v3",
+    "save_transcripts": true,
+    "clipboard_on_long": true,
+    "transcript_dir": "~/.local/share/talkat/transcripts"
 }
 ```
+
+### Transcript Features
+- All transcripts (both short and long mode) are saved to `~/.local/share/talkat/transcripts/`
+- Short mode: saves as `YYYYMMDD_HHMMSS_short.txt`
+- Long mode: saves as `YYYYMMDD_HHMMSS_long.txt`
+- Disable transcript saving: set `"save_transcripts": false`
+- Change transcript location: set `"transcript_dir": "/your/custom/path"`
 
 ## How It Works
 

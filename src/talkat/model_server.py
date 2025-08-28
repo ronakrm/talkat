@@ -206,11 +206,16 @@ def transcribe_audio_stream():
                 return jsonify({"error": "Faster-whisper model not correctly loaded"}), 500
 
             audio_buffer = bytearray()
-            while True:
-                chunk = request.stream.read(4096)
-                if not chunk:
-                    break
-                audio_buffer.extend(chunk)
+            try:
+                while True:
+                    chunk = request.stream.read(4096)
+                    if not chunk:
+                        break
+                    audio_buffer.extend(chunk)
+            except (OSError, ValueError) as e:
+                # Client disconnected abruptly
+                print(f"Client disconnected during streaming: {e}", file=sys.stderr)
+                return jsonify({"error": "Client disconnected"}), 499
             
             audio_bytes = bytes(audio_buffer)
 

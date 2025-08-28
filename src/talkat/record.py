@@ -246,7 +246,10 @@ def stream_audio_with_vad(
 
     if silence_threshold is None:
         print("Warning: silence_threshold not provided to stream_audio_with_vad. Using a default fallback.")
-        silence_threshold = 500.0 
+        silence_threshold = 500.0
+    
+    # If silence_threshold is 0, disable VAD and stream continuously
+    no_vad_mode = (silence_threshold == 0) 
     
     mic_index: Optional[int] = find_microphone()
     if mic_index is None:
@@ -278,7 +281,10 @@ def stream_audio_with_vad(
     # First, yield the sample rate
     yield RATE
 
-    print(f"Streaming with threshold {silence_threshold:.1f}, silence duration {silence_duration:.1f}s...")
+    if no_vad_mode:
+        print(f"Streaming continuously without VAD (max duration: {MAX_RECORDING_DURATION_SECONDS:.0f}s)...")
+    else:
+        print(f"Streaming with threshold {silence_threshold:.1f}, silence duration {silence_duration:.1f}s...")
     if debug: print("Speak now for streaming!")
     
     try:
@@ -322,29 +328,34 @@ def stream_audio_with_vad(
             if debug and total_chunks_processed % (int(1000/chunk_size_ms) // 2) == 0: # Log roughly every 0.5s
                  print(f"Stream chunk {total_chunks_processed}: Vol: {volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_chunks_count}/{max_silent_chunks_to_stop} Speaking: {is_speaking}")
 
-            if volume > silence_threshold:
-                if not is_speaking: # Transition to speaking
-                    if debug: print(f"Speech detected for streaming! Volume: {volume:.1f}")
-                    is_speaking = True
-                    # Yield pre-buffered audio first
-                    for pre_chunk in list(pre_speech_buffer):
-                        yield pre_chunk
-                    pre_speech_buffer.clear() # Clear after yielding
-                    speech_has_started_and_padded = True
-                
-                yield data # Yield current speech data chunk
-                silent_chunks_count = 0
-            else: # volume <= silence_threshold
-                if is_speaking:
-                    # Still considered speaking, but it's a silent part of it.
-                    yield data # Yield this silence as part of the speech
-                    silent_chunks_count += 1
-                    if silent_chunks_count > max_silent_chunks_to_stop:
-                        if debug: print("Silence duration exceeded after speech, stopping stream.")
-                        break # Stop streaming after this utterance
-                elif not speech_has_started_and_padded: # Only buffer if we haven't started speech & padding yet
-                    # Still not speaking, keep adding to pre_speech_buffer
-                    pre_speech_buffer.append(data)
+            if no_vad_mode:
+                # In no-VAD mode, just yield all audio continuously
+                yield data
+            else:
+                # Normal VAD mode
+                if volume > silence_threshold:
+                    if not is_speaking: # Transition to speaking
+                        if debug: print(f"Speech detected for streaming! Volume: {volume:.1f}")
+                        is_speaking = True
+                        # Yield pre-buffered audio first
+                        for pre_chunk in list(pre_speech_buffer):
+                            yield pre_chunk
+                        pre_speech_buffer.clear() # Clear after yielding
+                        speech_has_started_and_padded = True
+                    
+                    yield data # Yield current speech data chunk
+                    silent_chunks_count = 0
+                else: # volume <= silence_threshold
+                    if is_speaking:
+                        # Still considered speaking, but it's a silent part of it.
+                        yield data # Yield this silence as part of the speech
+                        silent_chunks_count += 1
+                        if silent_chunks_count > max_silent_chunks_to_stop:
+                            if debug: print("Silence duration exceeded after speech, stopping stream.")
+                            break # Stop streaming after this utterance
+                    elif not speech_has_started_and_padded: # Only buffer if we haven't started speech & padding yet
+                        # Still not speaking, keep adding to pre_speech_buffer
+                        pre_speech_buffer.append(data)
         
         if total_chunks_processed >= max_total_chunks:
             if debug: print("Maximum recording duration reached for stream.")

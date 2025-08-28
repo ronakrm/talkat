@@ -299,6 +299,18 @@ def run_long_dictation_command(
     clipboard: bool = True
 ):
     """Runs long dictation mode with continuous speech recognition."""
+    # Clean up PID file on exit
+    from pathlib import Path
+    PID_FILE = Path.home() / ".cache" / "talkat" / "long_dictation.pid"
+    
+    def cleanup_pid():
+        try:
+            if PID_FILE.exists():
+                pid_text = PID_FILE.read_text().strip()
+                if pid_text and os.getpid() == int(pid_text):
+                    PID_FILE.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            pass
     
     # Use the passed silence_threshold
     current_threshold = silence_threshold
@@ -334,14 +346,15 @@ def run_long_dictation_command(
         pass
     
     full_transcript = []
+    session = requests.Session()
     
     try:
         while True:  # Continue until interrupted
             # Use the existing stream_audio_with_vad for each utterance
             audio_stream_generator_func = stream_audio_with_vad(
-                silence_threshold=current_threshold, 
+                silence_threshold=0,  # No silence threshold for long mode
                 debug=False,  # Less verbose for continuous mode
-                max_duration=None  # No timeout for long mode
+                max_duration=600.0  # 10 minute timeout for long mode
             )
 
             # Get the sample rate first
@@ -367,7 +380,7 @@ def run_long_dictation_command(
             
             server_url = "http://127.0.0.1:5555/transcribe_stream"
             try:
-                response = requests.post(server_url, data=request_data_generator(), timeout=120)
+                response = session.post(server_url, data=request_data_generator(), timeout=120)
                 response.raise_for_status()
                 
                 response_json = response.json()
@@ -402,6 +415,9 @@ def run_long_dictation_command(
     except KeyboardInterrupt:
         print("\nLong dictation mode stopped.")
         
+        # Close the session cleanly
+        session.close()
+        
         # Join all transcript parts
         full_text = ' '.join(full_transcript)
         
@@ -422,12 +438,19 @@ def run_long_dictation_command(
             subprocess.run(['notify-send', 'Talkat', f'Long dictation stopped. Saved to {transcript_filename}'], check=False)
         except FileNotFoundError:
             pass
+        
+        cleanup_pid()
         return 0
     except Exception as e:
         print(f"Error in long dictation mode: {e}")
         import traceback
         traceback.print_exc()
+        session.close()
+        cleanup_pid()
         return 1
+    finally:
+        session.close()
+        cleanup_pid()
 
 def main(mode="listen"):
     # Load config (defaults updated by file)

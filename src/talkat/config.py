@@ -21,9 +21,9 @@ CODE_DEFAULTS: Dict[str, Any] = {
     "save_transcripts": True,
     "transcript_dir": os.path.expanduser("~/.local/share/talkat/transcripts"),
     # New model-related options
-    "distil_model_name": "distil-whisper/distil-large-v3",
+    "distil_model_name": "distil-whisper/distil-medium.en",  # Medium model better for CPU
     "model_cache_dir": os.path.expanduser("~/.cache/talkat/models"),
-    "device": "auto",  # auto, cpu, cuda
+    "device": "cpu",  # cpu, cuda, auto - defaulting to CPU for compatibility
 }
 
 def load_app_config() -> Dict[str, Any]:

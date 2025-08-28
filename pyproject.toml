@@ -12,11 +12,19 @@ dependencies = [
     "flask>=2.0",
     "requests>=2.20",
     "transformers>=4.36.0",
-    "torch>=2.0.0",
     "accelerate>=0.24.0",
     "librosa>=0.10.1",
     "soundfile>=0.12.1"
 ]
+
+# Install CPU-only torch to avoid large GPU dependencies
+# Users can override with: pip install torch --index-url https://download.pytorch.org/whl/cu118
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 
 [project.scripts]
 talkat = "talkat.cli:main"

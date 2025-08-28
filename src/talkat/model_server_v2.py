@@ -141,8 +141,14 @@ class DistilWhisperBackend(ModelBackend):
         logger.info(f"Loading Distil-Whisper model: {model_name}")
         self.model_name = model_name
         
-        # Determine device
-        self.device = kwargs.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
+        # Determine device - default to CPU for broader compatibility
+        device_setting = kwargs.get('device', 'cpu')
+        if device_setting == 'auto':
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device_setting
+        
+        # Use float32 for CPU (float16 only benefits GPU)
         self.torch_dtype = torch.float16 if self.device == 'cuda' else torch.float32
         
         cache_dir = kwargs.get('cache_dir')

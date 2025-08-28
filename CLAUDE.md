@@ -313,6 +313,12 @@ Since no automated tests exist, these need manual verification:
 - `numpy>=2.2.6` - Array operations
 - `flask>=2.0` - HTTP server
 - `requests>=2.20` - HTTP client
+- `transformers>=4.36.0` - For Distil-Whisper models
+- `torch` - CPU-only version by default (see CPU_OPTIMIZATION.md)
+- `librosa>=0.10.1` - Audio file processing
+- `soundfile>=0.12.1` - Audio file I/O
+
+**Note**: PyTorch is installed as CPU-only by default to reduce size and improve compatibility. GPU users can override this if needed.
 
 ### System Requirements
 - `ydotool` - Wayland input automation

@@ -6,13 +6,16 @@ import subprocess
 import signal
 import argparse
 from pathlib import Path
+from typing import Optional
+
 from .main import main as client_main
 from .model_server import main as server_main
+from .file_processor import process_audio_file_command, batch_process_files
 
 # PID file location
 PID_FILE = Path.home() / ".cache" / "talkat" / "long_dictation.pid"
 
-def get_long_pid():
+def get_long_pid() -> Optional[int]:
     """Get the PID of the running long dictation process."""
     if PID_FILE.exists():
         try:
@@ -26,7 +29,7 @@ def get_long_pid():
             PID_FILE.unlink(missing_ok=True)
     return None
 
-def start_long_background():
+def start_long_background() -> int:
     """Start long dictation in background."""
     if get_long_pid():
         print("Long dictation is already running.")
@@ -53,7 +56,7 @@ def start_long_background():
         pass
     return 0
 
-def stop_long_background():
+def stop_long_background() -> int:
     """Stop the background long dictation process."""
     pid = get_long_pid()
     if not pid:
@@ -75,14 +78,14 @@ def stop_long_background():
         PID_FILE.unlink(missing_ok=True)
         return 1
 
-def toggle_long_background():
+def toggle_long_background() -> int:
     """Toggle long dictation - start if stopped, stop if running."""
     if get_long_pid():
         return stop_long_background()
     else:
         return start_long_background()
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Talkat - Voice Command System")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
@@ -103,6 +106,25 @@ def main():
     
     # Server mode
     server_parser = subparsers.add_parser("server", help="Start the model server")
+    
+    # Calibration mode
+    calibrate_parser = subparsers.add_parser("calibrate", help="Calibrate microphone threshold")
+    
+    # File transcription mode
+    file_parser = subparsers.add_parser("file", help="Transcribe an audio file")
+    file_parser.add_argument("input", help="Path to audio file (.wav, .mp3, .flac, etc.)")
+    file_parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
+    file_parser.add_argument("-f", "--format", choices=["text", "json", "srt", "vtt"], 
+                           default="text", help="Output format (default: text)")
+    file_parser.add_argument("-c", "--clipboard", action="store_true", 
+                           help="Copy transcription to clipboard")
+    
+    # Batch file processing
+    batch_parser = subparsers.add_parser("batch", help="Process multiple audio files")
+    batch_parser.add_argument("files", nargs="+", help="Audio files to process")
+    batch_parser.add_argument("-o", "--output-dir", help="Output directory for transcriptions")
+    batch_parser.add_argument("-f", "--format", choices=["text", "json", "srt", "vtt"],
+                            default="text", help="Output format (default: text)")
 
     args = parser.parse_args()
 
@@ -118,6 +140,22 @@ def main():
         sys.exit(toggle_long_background())
     elif args.command == "server":
         server_main()
+    elif args.command == "calibrate":
+        # Run calibration through main with calibrate mode
+        client_main(mode="calibrate")
+    elif args.command == "file":
+        sys.exit(process_audio_file_command(
+            args.input,
+            args.output,
+            args.format,
+            args.clipboard
+        ))
+    elif args.command == "batch":
+        sys.exit(batch_process_files(
+            args.files,
+            args.output_dir,
+            args.format
+        ))
     else:
         parser.print_help()
         sys.exit(1)

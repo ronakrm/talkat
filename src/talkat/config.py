@@ -10,7 +10,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 # 1. CODE DEFAULTS
 CODE_DEFAULTS: Dict[str, Any] = {
     "silence_threshold": 200.0,
-    "model_type": "faster-whisper",
+    "model_type": "faster-whisper",  # Options: faster-whisper, distil-whisper, vosk
     "model_name": "base.en",
     "faster_whisper_model_cache_dir": os.path.expanduser("~/.cache/talkat/faster-whisper"),
     "fw_device": "cpu",
@@ -20,6 +20,10 @@ CODE_DEFAULTS: Dict[str, Any] = {
     "clipboard_on_long": True,
     "save_transcripts": True,
     "transcript_dir": os.path.expanduser("~/.local/share/talkat/transcripts"),
+    # New model-related options
+    "distil_model_name": "distil-whisper/distil-large-v3",
+    "model_cache_dir": os.path.expanduser("~/.cache/talkat/models"),
+    "device": "auto",  # auto, cpu, cuda
 }
 
 def load_app_config() -> Dict[str, Any]:

@@ -1,0 +1,298 @@
+"""Audio file processing module for transcribing audio files directly."""
+
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Optional, Tuple
+
+import numpy as np
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+def transcribe_audio_file(
+    file_path: str,
+    server_url: str = "http://127.0.0.1:5555",
+    output_format: str = "text"
+) -> Tuple[str, float]:
+    """
+    Transcribe an audio file using the model server.
+    
+    Args:
+        file_path: Path to the audio file
+        server_url: URL of the model server
+        output_format: Output format (text, json, srt, vtt)
+    
+    Returns:
+        Tuple of (transcription, duration in seconds)
+    """
+    file_path = Path(file_path)
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"Audio file not found: {file_path}")
+    
+    # Check file extension
+    supported_formats = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.mp4', '.webm'}
+    if file_path.suffix.lower() not in supported_formats:
+        raise ValueError(f"Unsupported file format: {file_path.suffix}")
+    
+    try:
+        import librosa
+        import soundfile as sf
+    except ImportError:
+        print("Error: librosa and soundfile are required for file processing")
+        print("Install them with: pip install librosa soundfile")
+        sys.exit(1)
+    
+    print(f"Loading audio file: {file_path}")
+    
+    try:
+        # Load audio file and resample to 16kHz
+        audio_data, sample_rate = librosa.load(str(file_path), sr=16000, mono=True)
+        duration = len(audio_data) / sample_rate
+        
+        print(f"Audio loaded: {duration:.1f} seconds at {sample_rate} Hz")
+        
+        # Check if server is running
+        try:
+            health_response = requests.get(f"{server_url}/health", timeout=2)
+            if health_response.status_code != 200:
+                print("Error: Model server is not ready")
+                sys.exit(1)
+        except requests.ConnectionError:
+            print("Error: Model server is not running")
+            print("Start it with: talkat server")
+            sys.exit(1)
+        
+        # Send file to server for transcription
+        with open(file_path, 'rb') as f:
+            files = {'audio': (file_path.name, f, 'audio/*')}
+            response = requests.post(
+                f"{server_url}/transcribe_file",
+                files=files,
+                timeout=max(30, duration * 2)  # Dynamic timeout based on duration
+            )
+        
+        if response.status_code != 200:
+            error_msg = response.json().get('error', 'Unknown error')
+            print(f"Error transcribing file: {error_msg}")
+            sys.exit(1)
+        
+        result = response.json()
+        transcription = result.get('text', '').strip()
+        
+        if not transcription:
+            print("Warning: No speech detected in the audio file")
+            return "", duration
+        
+        return transcription, duration
+        
+    except librosa.exceptions.NoBackendError:
+        print("Error: No audio backend available")
+        print("Install ffmpeg: sudo apt-get install ffmpeg")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error processing audio file: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def format_output(
+    transcription: str,
+    duration: float,
+    output_format: str = "text"
+) -> str:
+    """
+    Format transcription output.
+    
+    Args:
+        transcription: The transcribed text
+        duration: Duration of the audio in seconds
+        output_format: Output format (text, json, srt, vtt)
+    
+    Returns:
+        Formatted output string
+    """
+    if output_format == "json":
+        return json.dumps({
+            "text": transcription,
+            "duration": duration,
+            "words": transcription.split()
+        }, indent=2)
+    
+    elif output_format == "srt":
+        # Simple SRT format (single subtitle for entire transcription)
+        hours = int(duration // 3600)
+        minutes = int((duration % 3600) // 60)
+        seconds = duration % 60
+        
+        return f"""1
+00:00:00,000 --> {hours:02d}:{minutes:02d}:{seconds:06.3f}
+{transcription}
+"""
+    
+    elif output_format == "vtt":
+        # WebVTT format
+        hours = int(duration // 3600)
+        minutes = int((duration % 3600) // 60)
+        seconds = duration % 60
+        
+        return f"""WEBVTT
+
+00:00:00.000 --> {hours:02d}:{minutes:02d}:{seconds:06.3f}
+{transcription}
+"""
+    
+    else:  # Default to text
+        return transcription
+
+
+def process_audio_file_command(
+    file_path: str,
+    output_file: Optional[str] = None,
+    output_format: str = "text",
+    clipboard: bool = False
+) -> int:
+    """
+    Process an audio file and output the transcription.
+    
+    Args:
+        file_path: Path to the audio file
+        output_file: Optional output file path
+        output_format: Output format (text, json, srt, vtt)
+        clipboard: Whether to copy to clipboard
+    
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    try:
+        # Transcribe the file
+        transcription, duration = transcribe_audio_file(file_path)
+        
+        if not transcription:
+            print("No speech detected in the audio file")
+            return 1
+        
+        # Format the output
+        formatted_output = format_output(transcription, duration, output_format)
+        
+        # Output to file if specified
+        if output_file:
+            output_path = Path(output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(formatted_output)
+            print(f"Transcription saved to: {output_path}")
+        else:
+            # Output to stdout
+            print(formatted_output)
+        
+        # Copy to clipboard if requested
+        if clipboard:
+            try:
+                import subprocess
+                # Try wl-copy first (Wayland)
+                try:
+                    subprocess.run(
+                        ['wl-copy'],
+                        input=transcription.encode('utf-8'),
+                        check=True,
+                        capture_output=True
+                    )
+                    print("Transcription copied to clipboard")
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # Fallback to xclip (X11)
+                    try:
+                        subprocess.run(
+                            ['xclip', '-selection', 'clipboard'],
+                            input=transcription.encode('utf-8'),
+                            check=True,
+                            capture_output=True
+                        )
+                        print("Transcription copied to clipboard")
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        print("Warning: Could not copy to clipboard (wl-copy or xclip not found)")
+            except Exception as e:
+                print(f"Warning: Could not copy to clipboard: {e}")
+        
+        # Show summary
+        print(f"\nSummary:")
+        print(f"  Duration: {duration:.1f} seconds")
+        print(f"  Words: {len(transcription.split())}")
+        print(f"  Characters: {len(transcription)}")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+
+
+def batch_process_files(
+    file_paths: list[str],
+    output_dir: Optional[str] = None,
+    output_format: str = "text"
+) -> int:
+    """
+    Process multiple audio files in batch.
+    
+    Args:
+        file_paths: List of audio file paths
+        output_dir: Optional output directory
+        output_format: Output format for transcriptions
+    
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    success_count = 0
+    error_count = 0
+    
+    for file_path in file_paths:
+        file_path = Path(file_path)
+        print(f"\nProcessing: {file_path.name}")
+        print("-" * 40)
+        
+        try:
+            transcription, duration = transcribe_audio_file(str(file_path))
+            
+            if transcription:
+                formatted_output = format_output(transcription, duration, output_format)
+                
+                if output_dir:
+                    # Determine output file extension
+                    if output_format == "json":
+                        ext = ".json"
+                    elif output_format == "srt":
+                        ext = ".srt"
+                    elif output_format == "vtt":
+                        ext = ".vtt"
+                    else:
+                        ext = ".txt"
+                    
+                    output_file = output_dir / f"{file_path.stem}{ext}"
+                    output_file.write_text(formatted_output)
+                    print(f"Saved to: {output_file}")
+                else:
+                    print(formatted_output)
+                
+                success_count += 1
+            else:
+                print("No speech detected")
+                error_count += 1
+                
+        except Exception as e:
+            print(f"Error: {e}")
+            error_count += 1
+    
+    print(f"\n{'=' * 40}")
+    print(f"Batch processing complete:")
+    print(f"  Success: {success_count}")
+    print(f"  Errors: {error_count}")
+    
+    return 0 if error_count == 0 else 1

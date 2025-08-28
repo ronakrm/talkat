@@ -460,7 +460,12 @@ def main(mode="listen"):
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
     # Set default command based on mode
-    default_command = 'listen' if mode == 'listen' else 'long'
+    if mode == "calibrate":
+        default_command = 'calibrate'
+    elif mode == "long":
+        default_command = 'long'
+    else:
+        default_command = 'listen'
     parser.add_argument('command', nargs='?', default=default_command, choices=['listen', 'calibrate', 'long'], 
                         help='Command to run.')
 

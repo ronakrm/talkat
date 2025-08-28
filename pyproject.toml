@@ -10,7 +10,12 @@ dependencies = [
     "pyaudio>=0.2.14",
     "vosk>=0.3.45",
     "flask>=2.0",
-    "requests>=2.20"
+    "requests>=2.20",
+    "transformers>=4.36.0",
+    "torch>=2.0.0",
+    "accelerate>=0.24.0",
+    "librosa>=0.10.1",
+    "soundfile>=0.12.1"
 ]
 
 [project.scripts]

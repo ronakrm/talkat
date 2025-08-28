@@ -2,7 +2,7 @@ import pyaudio
 import subprocess
 import numpy as np
 import warnings
-from typing import Optional, Tuple, Generator, Union
+from typing import Optional, Tuple, Generator, Union, List, Deque
 import collections
 
 from .devices import find_microphone
@@ -39,8 +39,8 @@ def calibrate_microphone(duration: int = 3) -> float:
     print(f"Calibrating microphone for {duration} seconds...")
     print("Please speak normally during calibration...")
     
-    volumes = []
-    chunks_to_read = int(duration * RATE / CHUNK)
+    volumes: List[float] = []
+    chunks_to_read: int = int(duration * RATE / CHUNK)
     
     try:
         for i in range(chunks_to_read):
@@ -62,12 +62,12 @@ def calibrate_microphone(duration: int = 3) -> float:
         return 500.0
     
     # Calculate statistics
-    max_vol = float(max(volumes))
-    avg_vol = float(np.mean(volumes))
-    std_vol = float(np.std(volumes))
+    max_vol: float = float(max(volumes))
+    avg_vol: float = float(np.mean(volumes))
+    std_vol: float = float(np.std(volumes))
     
     # Set threshold as average + 1 standard deviation, but at least 50% of max
-    threshold = float(max(avg_vol + std_vol, max_vol * 0.5))
+    threshold: float = float(max(avg_vol + std_vol, max_vol * 0.5))
     
     print(f"Calibration complete!")
     print(f"  Average volume: {avg_vol:.1f}")
@@ -84,8 +84,8 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
     RATE = 16000
 
     # VAD Configuration
-    PRE_SPEECH_PADDING_DURATION = 0.3  # Seconds of audio to keep before speech starts
-    MAX_RECORDING_DURATION_SECONDS = 30 # Overall timeout for listening
+    PRE_SPEECH_PADDING_DURATION: float = 0.3  # Seconds of audio to keep before speech starts
+    MAX_RECORDING_DURATION_SECONDS: int = 30 # Overall timeout for listening
 
     if silence_threshold is None:
         # This path should ideally not be hit if main.py provides a threshold.
@@ -101,8 +101,8 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
             pass
         return None
     
-    p = pyaudio.PyAudio()
-    stream = None
+    p: pyaudio.PyAudio = pyaudio.PyAudio()
+    stream: Optional[pyaudio.Stream] = None
     try:
         stream = p.open(format=FORMAT, 
                        channels=CHANNELS, 
@@ -127,18 +127,18 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
     except FileNotFoundError:
         pass # notify-send is optional
     
-    recorded_audio_segments = []
-    current_segment_frames = [] 
+    recorded_audio_segments: List[bytes] = []
+    current_segment_frames: List[bytes] = [] 
 
-    num_pre_padding_chunks = int(PRE_SPEECH_PADDING_DURATION * RATE / CHUNK)
-    pre_speech_buffer = collections.deque(maxlen=num_pre_padding_chunks)
+    num_pre_padding_chunks: int = int(PRE_SPEECH_PADDING_DURATION * RATE / CHUNK)
+    pre_speech_buffer: Deque[bytes] = collections.deque(maxlen=num_pre_padding_chunks)
 
-    is_speaking = False
-    silent_chunks_count = 0
-    max_silent_chunks_to_stop = int(silence_duration * RATE / CHUNK)
+    is_speaking: bool = False
+    silent_chunks_count: int = 0
+    max_silent_chunks_to_stop: int = int(silence_duration * RATE / CHUNK)
     
-    max_total_chunks = int(MAX_RECORDING_DURATION_SECONDS * RATE / CHUNK)
-    total_chunks_processed = 0
+    max_total_chunks: int = int(MAX_RECORDING_DURATION_SECONDS * RATE / CHUNK)
+    total_chunks_processed: int = 0
     
     try:
         while total_chunks_processed < max_total_chunks:
@@ -213,7 +213,7 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
             pass
         return None
 
-    final_audio_data = b''.join(recorded_audio_segments)
+    final_audio_data: bytes = b''.join(recorded_audio_segments)
     
     if not final_audio_data: # Should be redundant given the check above
         if debug: print(f"Final audio data is empty.") # Should not happen
@@ -238,18 +238,18 @@ def stream_audio_with_vad(
     RATE = 16000 # Standard sample rate
     
     # Calculate chunk samples based on ms, ensure it's an integer for PyAudio
-    CHUNK_SAMPLES = int(RATE * chunk_size_ms / 1000) 
+    CHUNK_SAMPLES: int = int(RATE * chunk_size_ms / 1000) 
 
     # VAD Configuration
-    PRE_SPEECH_PADDING_DURATION = 0.3  # Seconds of audio to keep before speech starts
-    MAX_RECORDING_DURATION_SECONDS = max_duration if max_duration is not None else float('inf')
+    PRE_SPEECH_PADDING_DURATION: float = 0.3  # Seconds of audio to keep before speech starts
+    MAX_RECORDING_DURATION_SECONDS: float = max_duration if max_duration is not None else float('inf')
 
     if silence_threshold is None:
         print("Warning: silence_threshold not provided to stream_audio_with_vad. Using a default fallback.")
         silence_threshold = 500.0
     
     # If silence_threshold is 0, disable VAD and stream continuously
-    no_vad_mode = (silence_threshold == 0) 
+    no_vad_mode: bool = (silence_threshold == 0) 
     
     mic_index: Optional[int] = find_microphone()
     if mic_index is None:
@@ -260,8 +260,8 @@ def stream_audio_with_vad(
             pass
         return # End generator if no mic
     
-    p = pyaudio.PyAudio()
-    stream = None
+    p: pyaudio.PyAudio = pyaudio.PyAudio()
+    stream: Optional[pyaudio.Stream] = None
     try:
         stream = p.open(format=FORMAT, 
                        channels=CHANNELS, 
@@ -292,19 +292,20 @@ def stream_audio_with_vad(
     except FileNotFoundError:
         pass
     
-    num_pre_padding_chunks = int(PRE_SPEECH_PADDING_DURATION * RATE / CHUNK_SAMPLES)
-    pre_speech_buffer = collections.deque(maxlen=num_pre_padding_chunks)
+    num_pre_padding_chunks: int = int(PRE_SPEECH_PADDING_DURATION * RATE / CHUNK_SAMPLES)
+    pre_speech_buffer: Deque[bytes] = collections.deque(maxlen=num_pre_padding_chunks)
 
-    is_speaking = False
-    silent_chunks_count = 0
-    max_silent_chunks_to_stop = int(silence_duration * RATE / CHUNK_SAMPLES)
+    is_speaking: bool = False
+    silent_chunks_count: int = 0
+    max_silent_chunks_to_stop: int = int(silence_duration * RATE / CHUNK_SAMPLES)
     
+    max_total_chunks: Union[float, int]
     if MAX_RECORDING_DURATION_SECONDS == float('inf'):
         max_total_chunks = float('inf')
     else:
         max_total_chunks = int(MAX_RECORDING_DURATION_SECONDS * RATE / CHUNK_SAMPLES)
-    total_chunks_processed = 0
-    speech_has_started_and_padded = False
+    total_chunks_processed: int = 0
+    speech_has_started_and_padded: bool = False
     
     try:
         while total_chunks_processed < max_total_chunks:

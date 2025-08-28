@@ -129,7 +129,7 @@ def calibrate_microphone(duration: int = 10) -> float:
     
     return float(max(50.0, min(threshold, 1000.0)))  # Clamp between 50.0 and 1000.0, ensure float
 
-def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_duration: float = 2.0, debug: bool = True) -> Optional[Tuple[bytes, int]]:
+def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_duration: float = 3.0, debug: bool = True) -> Optional[Tuple[bytes, int]]:
     """Record with improved VAD: pre-speech padding, defined speech segments, and clear stopping."""
     CHUNK = 1024
     FORMAT = pyaudio.paInt16
@@ -214,7 +214,9 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
             volume = np.sqrt(np.mean(audio_data.astype(np.float32)**2)) # Use float32 for mean calculation to avoid overflow
 
             if debug and total_chunks_processed % 10 == 0: # Print more frequently for debugging if needed
-                 print(f"Chunk {total_chunks_processed}: Vol: {volume:.1f} (Thr: {silence_threshold:.1f}) SilentChunks: {silent_chunks_count}/{max_silent_chunks_to_stop} Speaking: {is_speaking}")
+                silent_time = silent_chunks_count * CHUNK / RATE
+                max_silent_time = max_silent_chunks_to_stop * CHUNK / RATE
+                print(f"Chunk {total_chunks_processed}: Vol: {volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
 
             if volume > silence_threshold:
                 if not is_speaking: # Transition to speaking
@@ -278,7 +280,7 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
 # New function for streaming with VAD
 def stream_audio_with_vad(
     silence_threshold: Optional[float] = None, 
-    silence_duration: float = 2.0, 
+    silence_duration: float = 3.0,  # 3 seconds of silence before stopping
     debug: bool = True,
     chunk_size_ms: int = 30, # VAD works well with 10, 20, or 30ms frames
     max_duration: Optional[float] = 30.0  # None for unlimited
@@ -380,7 +382,9 @@ def stream_audio_with_vad(
             volume = np.sqrt(np.mean(audio_data_np.astype(np.float32)**2))
 
             if debug and total_chunks_processed % (int(1000/chunk_size_ms) // 2) == 0: # Log roughly every 0.5s
-                 print(f"Stream chunk {total_chunks_processed}: Vol: {volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_chunks_count}/{max_silent_chunks_to_stop} Speaking: {is_speaking}")
+                silent_time = silent_chunks_count * chunk_size_ms / 1000.0
+                max_silent_time = max_silent_chunks_to_stop * chunk_size_ms / 1000.0
+                print(f"Stream chunk {total_chunks_processed}: Vol: {volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
 
             if no_vad_mode:
                 # In no-VAD mode, just yield all audio continuously

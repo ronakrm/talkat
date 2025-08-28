@@ -171,7 +171,9 @@ def run_listen_command(
         # 2. yields audio_chunk (bytes) ...
         # Stops when speech ends.
         audio_stream_generator_func = stream_audio_with_vad(
-            silence_threshold=current_threshold, debug=True
+            silence_threshold=current_threshold, 
+            silence_duration=3.0,  # 3 seconds of silence before stopping
+            debug=True
         )
 
         # Get the sample rate first

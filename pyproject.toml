@@ -3,15 +3,16 @@ name = "talkat"
 version = "0.1.0"
 description = "A voice command system with local model server"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"  # Explicitly support Python 3.12
 dependencies = [
     "faster-whisper>=1.1.1",
-    "numpy>=2.2.6",
+    "numpy>=1.24.0,<2.2",  # Compatible with PyTorch CPU index
     "pyaudio>=0.2.14",
     "vosk>=0.3.45",
     "flask>=2.0",
     "requests>=2.20",
     "transformers>=4.36.0",
+    "torch>=2.0.0",  # Explicitly include torch
     "accelerate>=0.24.0",
     "librosa>=0.10.1",
     "soundfile>=0.12.1"

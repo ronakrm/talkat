@@ -121,7 +121,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$APP_DIR
-ExecStart=$HOME/.local/bin/uv run talkat server
+ExecStart=/usr/bin/uv run talkat server
 Restart=always
 RestartSec=3
 

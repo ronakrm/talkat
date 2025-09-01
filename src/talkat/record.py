@@ -95,9 +95,9 @@ def calibrate_microphone(duration: int = 10) -> float:
     max_vol: float = float(np.max(volumes_array))
     min_vol: float = float(np.min(volumes_array))
     
-    # Set threshold as 2.5x the 90th percentile noise floor
-    # This gives good separation between background noise and speech
-    threshold: float = noise_floor * 2.5
+    # Set threshold as the 95th percentile (ignoring top 5% of noise spikes)
+    # This provides a good balance between sensitivity and noise rejection
+    threshold: float = p95
     
     # But ensure it's at least some minimum value
     threshold = max(threshold, 50.0)
@@ -114,7 +114,7 @@ def calibrate_microphone(duration: int = 10) -> float:
     print(f"    99th percentile:    {p99:8.1f}")
     print(f"    Max volume:         {max_vol:8.1f}")
     print(f"\n  Recommended threshold: {threshold:8.1f}")
-    print(f"  (2.5x noise floor for reliable speech detection)")
+    print(f"  (95th percentile - ignores top 5% noise spikes)")
     print("="*60)
     
     # Show notification with result
@@ -127,7 +127,7 @@ def calibrate_microphone(duration: int = 10) -> float:
     except FileNotFoundError:
         pass
     
-    return float(max(50.0, min(threshold, 1000.0)))  # Clamp between 50.0 and 1000.0, ensure float
+    return float(max(50.0, min(threshold, 5000.0)))  # Clamp between 50.0 and 5000.0 for high-noise environments
 
 def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_duration: float = 3.0, debug: bool = True) -> Optional[Tuple[bytes, int]]:
     """Record with improved VAD: pre-speech padding, defined speech segments, and clear stopping."""
@@ -190,6 +190,10 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
     silent_chunks_count: int = 0
     max_silent_chunks_to_stop: int = int(silence_duration * RATE / CHUNK)
     
+    # Add smoothing for volume detection to avoid false triggers from noise spikes
+    SMOOTHING_WINDOW: int = 3  # Number of chunks to average
+    volume_history: Deque[float] = collections.deque(maxlen=SMOOTHING_WINDOW)
+    
     max_total_chunks: int = int(MAX_RECORDING_DURATION_SECONDS * RATE / CHUNK)
     total_chunks_processed: int = 0
     
@@ -212,13 +216,19 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
                 continue
 
             volume = np.sqrt(np.mean(audio_data.astype(np.float32)**2)) # Use float32 for mean calculation to avoid overflow
+            
+            # Add to volume history for smoothing
+            volume_history.append(volume)
+            
+            # Use smoothed volume (average of recent samples) to reduce noise spikes
+            smoothed_volume = float(np.mean(volume_history)) if len(volume_history) > 0 else volume
 
             if debug and total_chunks_processed % 10 == 0: # Print more frequently for debugging if needed
                 silent_time = silent_chunks_count * CHUNK / RATE
                 max_silent_time = max_silent_chunks_to_stop * CHUNK / RATE
-                print(f"Chunk {total_chunks_processed}: Vol: {volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
+                print(f"Chunk {total_chunks_processed}: Vol: {volume:.1f} Smooth: {smoothed_volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
 
-            if volume > silence_threshold:
+            if smoothed_volume > silence_threshold:
                 if not is_speaking: # Transition to speaking
                     if debug: print(f"Speech detected! Volume: {volume:.1f}")
                     is_speaking = True
@@ -354,6 +364,10 @@ def stream_audio_with_vad(
     silent_chunks_count: int = 0
     max_silent_chunks_to_stop: int = int(silence_duration * RATE / CHUNK_SAMPLES)
     
+    # Add smoothing for volume detection to avoid false triggers from noise spikes
+    SMOOTHING_WINDOW: int = 3  # Number of chunks to average
+    volume_history: Deque[float] = collections.deque(maxlen=SMOOTHING_WINDOW)
+    
     max_total_chunks: Union[float, int]
     if MAX_RECORDING_DURATION_SECONDS == float('inf'):
         max_total_chunks = float('inf')
@@ -380,18 +394,24 @@ def stream_audio_with_vad(
                 continue
 
             volume = np.sqrt(np.mean(audio_data_np.astype(np.float32)**2))
+            
+            # Add to volume history for smoothing
+            volume_history.append(volume)
+            
+            # Use smoothed volume (average of recent samples) to reduce noise spikes
+            smoothed_volume = float(np.mean(volume_history)) if len(volume_history) > 0 else volume
 
             if debug and total_chunks_processed % (int(1000/chunk_size_ms) // 2) == 0: # Log roughly every 0.5s
                 silent_time = silent_chunks_count * chunk_size_ms / 1000.0
                 max_silent_time = max_silent_chunks_to_stop * chunk_size_ms / 1000.0
-                print(f"Stream chunk {total_chunks_processed}: Vol: {volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
+                print(f"Stream chunk {total_chunks_processed}: Vol: {volume:.1f} Smooth: {smoothed_volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
 
             if no_vad_mode:
                 # In no-VAD mode, just yield all audio continuously
                 yield data
             else:
-                # Normal VAD mode
-                if volume > silence_threshold:
+                # Normal VAD mode - use smoothed volume for decision making
+                if smoothed_volume > silence_threshold:
                     if not is_speaking: # Transition to speaking
                         if debug: print(f"Speech detected for streaming! Volume: {volume:.1f}")
                         is_speaking = True

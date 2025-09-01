@@ -12,8 +12,9 @@ from .main import main as client_main
 from .model_server import main as server_main
 from .file_processor import process_audio_file_command, batch_process_files
 
-# PID file location
+# PID file locations
 PID_FILE = Path.home() / ".cache" / "talkat" / "long_dictation.pid"
+LISTEN_PID_FILE = Path.home() / ".cache" / "talkat" / "listen.pid"
 
 def get_long_pid() -> Optional[int]:
     """Get the PID of the running long dictation process."""
@@ -85,12 +86,48 @@ def toggle_long_background() -> int:
     else:
         return start_long_background()
 
+def get_listen_pid() -> Optional[int]:
+    """Get the PID of the running listen process."""
+    if LISTEN_PID_FILE.exists():
+        try:
+            with open(LISTEN_PID_FILE, 'r') as f:
+                pid = int(f.read().strip())
+                # Check if process is still running
+                os.kill(pid, 0)
+                return pid
+        except (ValueError, OSError, ProcessLookupError):
+            # PID file exists but process is not running
+            LISTEN_PID_FILE.unlink(missing_ok=True)
+    return None
+
+def stop_listen_process() -> int:
+    """Stop the running listen process."""
+    pid = get_listen_pid()
+    if not pid:
+        print("No active listen process found.")
+        return 1
+    
+    try:
+        # Send SIGINT (Ctrl+C) to trigger graceful shutdown
+        os.kill(pid, signal.SIGINT)
+        print(f"Stopped listen process (PID: {pid})")
+        LISTEN_PID_FILE.unlink(missing_ok=True)
+        try:
+            subprocess.run(['notify-send', 'Talkat', 'Recording stopped, transcribing...'], check=False)
+        except FileNotFoundError:
+            pass
+        return 0
+    except ProcessLookupError:
+        print("Listen process not found.")
+        LISTEN_PID_FILE.unlink(missing_ok=True)
+        return 1
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Talkat - Voice Command System")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # Client mode (listen)
-    listen_parser = subparsers.add_parser("listen", help="Start listening for voice commands")
+    listen_parser = subparsers.add_parser("listen", help="Toggle voice recording - starts if not running, stops if already recording")
     
     # Long dictation mode
     long_parser = subparsers.add_parser("long", help="Start long dictation mode (continuous recording)")
@@ -129,7 +166,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "listen":
-        client_main()
+        # Check if a listen process is already running
+        existing_pid = get_listen_pid()
+        if existing_pid:
+            # Stop the existing process
+            print(f"Stopping active recording (PID: {existing_pid})...")
+            sys.exit(stop_listen_process())
+        else:
+            # Start a new listen process
+            client_main()
     elif args.command == "long":
         client_main(mode="long")
     elif args.command == "start-long":

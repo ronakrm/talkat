@@ -141,8 +141,42 @@ def run_listen_command(
     fw_compute_type: str = "int8",
     fw_device_index: Union[int, List[int]] = 0,
     vosk_model_base_dir: str = "~/.local/share/vosk" # New parameter for Vosk model base
-):
+) -> int:
     """Runs the main speech-to-text process by sending audio to a model server."""
+    
+    # Set up PID file for toggle functionality
+    from pathlib import Path
+    import signal
+    import threading
+    LISTEN_PID_FILE = Path.home() / ".cache" / "talkat" / "listen.pid"
+    
+    # Ensure cache directory exists
+    LISTEN_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Write our PID to file to enable toggle functionality
+    with open(LISTEN_PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    
+    def cleanup_pid():
+        try:
+            if LISTEN_PID_FILE.exists():
+                pid_text = LISTEN_PID_FILE.read_text().strip()
+                if pid_text and os.getpid() == int(pid_text):
+                    LISTEN_PID_FILE.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            pass
+    
+    # Flag to signal recording should stop
+    stop_recording = threading.Event()
+    
+    # Set up signal handler for graceful shutdown when toggled off
+    def signal_handler(signum, frame):
+        print("\nRecording stopped by toggle command. Finishing transcription...")
+        stop_recording.set()
+        cleanup_pid()
+        # The audio stream will stop naturally when it checks the flag
+    
+    signal.signal(signal.SIGINT, signal_handler)
     
     text = "" # Initialize text variable
     
@@ -198,8 +232,9 @@ def run_listen_command(
             return 0
 
         print(f"Speech detected. Streaming audio at {sample_rate} Hz to model server...")
+        print("(Run 'talkat listen' again to stop recording)")
         try:
-            subprocess.run(['notify-send', 'Talkat', 'Streaming to server...'], check=False)
+            subprocess.run(['notify-send', 'Talkat', 'Recording... Run "talkat listen" again to stop'], check=False)
         except FileNotFoundError:
             pass
 
@@ -209,6 +244,9 @@ def run_listen_command(
             yield json.dumps(metadata).encode('utf-8') + b'\n'
             # Then, stream audio chunks from the modified record_audio_with_vad
             for audio_chunk in audio_stream_generator_func:
+                if stop_recording.is_set():
+                    print("Stopping audio stream due to toggle command...")
+                    break
                 if audio_chunk: # Ensure not None or empty bytes if VAD yields such
                     yield audio_chunk
         
@@ -277,8 +315,13 @@ def run_listen_command(
             except FileNotFoundError:
                 pass
             
+        cleanup_pid()
         return 0
             
+    except KeyboardInterrupt:
+        print("\nRecording interrupted.")
+        cleanup_pid()
+        return 0
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -287,6 +330,7 @@ def run_listen_command(
             subprocess.run(['notify-send', 'Talkat', f'Error: {e}'], check=False)
         except FileNotFoundError:
             pass
+        cleanup_pid()
         return 1
 
 def run_long_dictation_command(

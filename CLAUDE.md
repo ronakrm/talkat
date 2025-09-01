@@ -24,6 +24,9 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
        │
    Text Output
    (ydotool)
+       │
+   Toggle Control
+   (PID tracking)
 ```
 
 ### Core Components
@@ -39,6 +42,8 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - Implements Voice Activity Detection (VAD)
    - Streams audio to server for transcription
    - Types recognized text via ydotool (Wayland)
+   - **Toggle support**: PID file tracking for start/stop with same command
+   - Graceful interruption handling via signals
 
 3. **Voice Activity Detection** (`record.py`)
    - Sophisticated VAD with pre-speech padding (0.3s)
@@ -46,11 +51,18 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - Streaming generator pattern for real-time processing
    - Configurable silence duration detection
 
-4. **Configuration** (`config.py`)
+4. **CLI Router** (`cli.py`)
+   - Command routing and argument parsing
+   - PID file management for toggle functionality
+   - Background process management for long dictation
+   - Process lifecycle handling
+
+5. **Configuration** (`config.py`)
    - Hierarchical config: defaults → file → CLI args
    - JSON config at `~/.config/talkat/config.json`
    - Model cache at `~/.cache/talkat/`
    - Transcripts at `~/.local/share/talkat/transcripts/`
+   - PID files at `~/.cache/talkat/*.pid`
 
 ## Development Workflow
 
@@ -78,8 +90,9 @@ uv run talkat listen
 # Start server in one terminal
 uv run talkat server
 
-# Test short dictation mode
-uv run talkat listen
+# Test short dictation mode with toggle
+uv run talkat listen  # Starts recording
+uv run talkat listen  # Stops recording and transcribes
 
 # Test long dictation mode
 uv run talkat long
@@ -90,6 +103,7 @@ uv run talkat calibrate
 # Test background long dictation
 uv run talkat start-long
 uv run talkat stop-long
+uv run talkat toggle-long
 ```
 
 ### Installation Modes
@@ -105,6 +119,8 @@ sudo ./setup.sh --system
 ```bash
 ./setup.sh --user
 ```
+
+**Note**: After making changes to the code, always run `./setup.sh` (with appropriate mode) to update the installed version.
 
 ## Code Patterns and Conventions
 
@@ -187,7 +203,8 @@ talkat/
 │   ├── devices.py       # Audio device discovery
 │   ├── record.py        # VAD and audio recording
 │   ├── model_server.py  # Flask HTTP server
-│   └── main.py          # Client orchestration
+│   ├── main.py          # Client orchestration
+│   └── file_processor.py # Audio file transcription
 ├── setup.sh             # Installation script
 ├── pyproject.toml       # Project configuration
 ├── CLAUDE.md           # This file
@@ -200,6 +217,7 @@ talkat/
 1. Add parser in `cli.py`
 2. Implement handler function in appropriate module
 3. Update CLAUDE.md and README.md
+4. Run `./setup.sh` to update the installed version
 
 ### Adding a New Model Backend
 1. Create model loader in `model_server.py`
@@ -223,11 +241,14 @@ Since no automated tests exist, these need manual verification:
    - [ ] Audio capture works
    - [ ] Transcription produces text
    - [ ] Text is typed correctly
+   - [ ] Toggle functionality works (second call stops recording)
 
 2. **Modes**
    - [ ] Listen mode (single utterance)
+   - [ ] Listen mode toggle (start/stop with same command)
    - [ ] Long mode (continuous)
-   - [ ] Background long mode
+   - [ ] Background long mode (start-long/stop-long)
+   - [ ] Toggle-long mode
    - [ ] Calibration mode
 
 3. **Edge Cases**
@@ -285,11 +306,12 @@ Since no automated tests exist, these need manual verification:
 ## Future Improvements
 
 ### High Priority
-1. Add comprehensive type hints throughout
-2. Implement proper logging framework
-3. Add automated tests
-4. Support audio file input (.wav, .mp3)
-5. Improve error messages and user feedback
+1. ~~Add toggle functionality for listen mode~~ ✅ Completed
+2. Add comprehensive type hints throughout
+3. Implement proper logging framework
+4. Add automated tests
+5. ~~Support audio file input (.wav, .mp3)~~ ✅ Completed
+6. Improve error messages and user feedback
 
 ### Medium Priority
 1. WebSocket support for real-time streaming
@@ -329,12 +351,28 @@ Since no automated tests exist, these need manual verification:
 
 ## Debugging Tips
 
+### Known Issues and Hacks
+
+#### Major Hacks/Workarounds
+1. **PID file management** - Basic file-based approach, should use proper IPC
+2. **Signal handling** - Interrupt handling is fragile  
+3. **Audio stream cleanup** - Not always properly cleaned up on errors
+4. **Hardcoded timeouts** - Many timeouts should be configurable
+5. **ALSA warnings** - Suppressed rather than properly handled
+6. **Error messages** - Often generic, need more context
+
+#### Known Bugs
+1. **Server errors on long recordings** - 500 errors after max duration
+2. **PID file race conditions** - Possible if commands run too quickly
+3. **Audio device selection** - Falls back to default without proper error
+4. **Memory leaks** - Possible in long-running server with certain models
+
 ### Common Issues
 
 1. **"Server not responding"**
-   - Check: `systemctl status talkat`
+   - Check: `systemctl status talkat` (system) or `systemctl --user status talkat` (user)
    - Check: `lsof -i :5555`
-   - Try: `systemctl restart talkat`
+   - Try: `systemctl restart talkat` (system) or `systemctl --user restart talkat` (user)
 
 2. **"No audio input"**
    - Check: `pactl list sources`
@@ -345,6 +383,11 @@ Since no automated tests exist, these need manual verification:
    - Check: ydotoold is running
    - Verify: Wayland compositor compatibility
    - Test: `ydotool type "test"`
+
+4. **"Toggle not working"**
+   - Check PID file: `ls ~/.cache/talkat/listen.pid`
+   - Clean up stale PIDs: `rm ~/.cache/talkat/*.pid`
+   - Update installation: `./setup.sh --user` or `sudo ./setup.sh`
 
 ### Debug Mode
 ```python

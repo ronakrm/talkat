@@ -3,9 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
 
-import numpy as np
 import requests
 
 from .logging_config import get_logger
@@ -14,48 +12,46 @@ logger = get_logger(__name__)
 
 
 def transcribe_audio_file(
-    file_path: str,
-    server_url: str = "http://127.0.0.1:5555",
-    output_format: str = "text"
-) -> Tuple[str, float]:
+    file_path: str, server_url: str = "http://127.0.0.1:5555", output_format: str = "text"
+) -> tuple[str, float]:
     """
     Transcribe an audio file using the model server.
-    
+
     Args:
         file_path: Path to the audio file
         server_url: URL of the model server
         output_format: Output format (text, json, srt, vtt)
-    
+
     Returns:
         Tuple of (transcription, duration in seconds)
     """
-    file_path = Path(file_path)
-    
-    if not file_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {file_path}")
-    
+    file_path_obj = Path(file_path)
+
+    if not file_path_obj.exists():
+        raise FileNotFoundError(f"Audio file not found: {file_path_obj}")
+
     # Check file extension
-    supported_formats = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.mp4', '.webm'}
-    if file_path.suffix.lower() not in supported_formats:
-        raise ValueError(f"Unsupported file format: {file_path.suffix}")
-    
+    supported_formats = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".mp4", ".webm"}
+    if file_path_obj.suffix.lower() not in supported_formats:
+        raise ValueError(f"Unsupported file format: {file_path_obj.suffix}")
+
     try:
         import librosa
-        import soundfile as sf
+        import soundfile  # noqa: F401 - test for availability
     except ImportError:
         logger.error("librosa and soundfile are required for file processing")
         logger.error("Install them with: pip install librosa soundfile")
         sys.exit(1)
-    
-    logger.info(f"Loading audio file: {file_path}")
-    
+
+    logger.info(f"Loading audio file: {file_path_obj}")
+
     try:
         # Load audio file and resample to 16kHz
-        audio_data, sample_rate = librosa.load(str(file_path), sr=16000, mono=True)
+        audio_data, sample_rate = librosa.load(str(file_path_obj), sr=16000, mono=True)
         duration = len(audio_data) / sample_rate
-        
+
         logger.info(f"Audio loaded: {duration:.1f} seconds at {sample_rate} Hz")
-        
+
         # Check if server is running
         try:
             health_response = requests.get(f"{server_url}/health", timeout=2)
@@ -66,120 +62,116 @@ def transcribe_audio_file(
             logger.error("Model server is not running")
             logger.error("Start it with: talkat server")
             sys.exit(1)
-        
+
         # Send file to server for transcription
-        with open(file_path, 'rb') as f:
-            files = {'audio': (file_path.name, f, 'audio/*')}
+        with open(file_path_obj, "rb") as f:
+            files = {"audio": (file_path_obj.name, f, "audio/*")}
             response = requests.post(
                 f"{server_url}/transcribe_file",
                 files=files,
-                timeout=max(30, duration * 2)  # Dynamic timeout based on duration
+                timeout=max(30, duration * 2),  # Dynamic timeout based on duration
             )
-        
+
         if response.status_code != 200:
-            error_msg = response.json().get('error', 'Unknown error')
+            error_msg = response.json().get("error", "Unknown error")
             logger.error(f"Error transcribing file: {error_msg}")
             sys.exit(1)
-        
+
         result = response.json()
-        transcription = result.get('text', '').strip()
-        
+        transcription = result.get("text", "").strip()
+
         if not transcription:
             logger.warning("No speech detected in the audio file")
             return "", duration
-        
+
         return transcription, duration
-        
-    except librosa.exceptions.NoBackendError:
-        logger.error("No audio backend available")
-        logger.error("Install ffmpeg: sudo apt-get install ffmpeg")
-        sys.exit(1)
+
     except Exception as e:
-        logger.error(f"Error processing audio file: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        if "NoBackendError" in str(type(e).__name__):
+            logger.error("No audio backend available")
+            logger.error("Install ffmpeg: sudo apt-get install ffmpeg")
+            sys.exit(1)
+        else:
+            logger.error(f"Error processing audio file: {e}")
+            import traceback
+
+            traceback.print_exc()
+            sys.exit(1)
 
 
-def format_output(
-    transcription: str,
-    duration: float,
-    output_format: str = "text"
-) -> str:
+def format_output(transcription: str, duration: float, output_format: str = "text") -> str:
     """
     Format transcription output.
-    
+
     Args:
         transcription: The transcribed text
         duration: Duration of the audio in seconds
         output_format: Output format (text, json, srt, vtt)
-    
+
     Returns:
         Formatted output string
     """
     if output_format == "json":
-        return json.dumps({
-            "text": transcription,
-            "duration": duration,
-            "words": transcription.split()
-        }, indent=2)
-    
+        return json.dumps(
+            {"text": transcription, "duration": duration, "words": transcription.split()}, indent=2
+        )
+
     elif output_format == "srt":
         # Simple SRT format (single subtitle for entire transcription)
         hours = int(duration // 3600)
         minutes = int((duration % 3600) // 60)
         seconds = duration % 60
-        
+
         return f"""1
 00:00:00,000 --> {hours:02d}:{minutes:02d}:{seconds:06.3f}
 {transcription}
 """
-    
+
     elif output_format == "vtt":
         # WebVTT format
         hours = int(duration // 3600)
         minutes = int((duration % 3600) // 60)
         seconds = duration % 60
-        
+
         return f"""WEBVTT
 
 00:00:00.000 --> {hours:02d}:{minutes:02d}:{seconds:06.3f}
 {transcription}
 """
-    
+
     else:  # Default to text
         return transcription
 
 
 def process_audio_file_command(
     file_path: str,
-    output_file: Optional[str] = None,
+    output_file: str | None = None,
     output_format: str = "text",
-    clipboard: bool = False
+    clipboard: bool = False,
 ) -> int:
     """
     Process an audio file and output the transcription.
-    
+
     Args:
         file_path: Path to the audio file
         output_file: Optional output file path
         output_format: Output format (text, json, srt, vtt)
         clipboard: Whether to copy to clipboard
-    
+
     Returns:
         Exit code (0 for success, 1 for error)
     """
     try:
         # Transcribe the file
         transcription, duration = transcribe_audio_file(file_path)
-        
+
         if not transcription:
             logger.warning("No speech detected in the audio file")
             return 1
-        
+
         # Format the output
         formatted_output = format_output(transcription, duration, output_format)
-        
+
         # Output to file if specified
         if output_file:
             output_path = Path(output_file)
@@ -189,83 +181,83 @@ def process_audio_file_command(
         else:
             # Output to stdout
             print(formatted_output)  # Keep this as print for stdout output
-        
+
         # Copy to clipboard if requested
         if clipboard:
             try:
                 import subprocess
+
                 # Try wl-copy first (Wayland)
                 try:
                     subprocess.run(
-                        ['wl-copy'],
-                        input=transcription.encode('utf-8'),
+                        ["wl-copy"],
+                        input=transcription.encode("utf-8"),
                         check=True,
-                        capture_output=True
+                        capture_output=True,
                     )
                     logger.info("Transcription copied to clipboard")
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     # Fallback to xclip (X11)
                     try:
                         subprocess.run(
-                            ['xclip', '-selection', 'clipboard'],
-                            input=transcription.encode('utf-8'),
+                            ["xclip", "-selection", "clipboard"],
+                            input=transcription.encode("utf-8"),
                             check=True,
-                            capture_output=True
+                            capture_output=True,
                         )
                         logger.info("Transcription copied to clipboard")
                     except (subprocess.CalledProcessError, FileNotFoundError):
                         logger.warning("Could not copy to clipboard (wl-copy or xclip not found)")
             except Exception as e:
                 logger.warning(f"Could not copy to clipboard: {e}")
-        
+
         # Show summary
-        logger.info(f"\nSummary:")
+        logger.info("\nSummary:")
         logger.info(f"  Duration: {duration:.1f} seconds")
         logger.info(f"  Words: {len(transcription.split())}")
         logger.info(f"  Characters: {len(transcription)}")
-        
+
         return 0
-        
+
     except Exception as e:
         logger.error(f"Error: {e}")
         return 1
 
 
 def batch_process_files(
-    file_paths: list[str],
-    output_dir: Optional[str] = None,
-    output_format: str = "text"
+    file_paths: list[str], output_dir: str | None = None, output_format: str = "text"
 ) -> int:
     """
     Process multiple audio files in batch.
-    
+
     Args:
         file_paths: List of audio file paths
         output_dir: Optional output directory
         output_format: Output format for transcriptions
-    
+
     Returns:
         Exit code (0 for success, 1 for error)
     """
+    output_dir_path: Path | None = None
     if output_dir:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
+        output_dir_path = Path(output_dir)
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+
     success_count = 0
     error_count = 0
-    
-    for file_path in file_paths:
-        file_path = Path(file_path)
+
+    for file_path_str in file_paths:
+        file_path = Path(file_path_str)
         logger.info(f"\nProcessing: {file_path.name}")
         logger.info("-" * 40)
-        
+
         try:
-            transcription, duration = transcribe_audio_file(str(file_path))
-            
+            transcription, duration = transcribe_audio_file(file_path_str)
+
             if transcription:
                 formatted_output = format_output(transcription, duration, output_format)
-                
-                if output_dir:
+
+                if output_dir_path:
                     # Determine output file extension
                     if output_format == "json":
                         ext = ".json"
@@ -275,25 +267,25 @@ def batch_process_files(
                         ext = ".vtt"
                     else:
                         ext = ".txt"
-                    
-                    output_file = output_dir / f"{file_path.stem}{ext}"
+
+                    output_file = output_dir_path / f"{file_path.stem}{ext}"
                     output_file.write_text(formatted_output)
                     logger.info(f"Saved to: {output_file}")
                 else:
                     print(formatted_output)  # Keep this as print for stdout output
-                
+
                 success_count += 1
             else:
                 logger.warning("No speech detected")
                 error_count += 1
-                
+
         except Exception as e:
             logger.error(f"Error: {e}")
             error_count += 1
-    
+
     logger.info(f"\n{'=' * 40}")
-    logger.info(f"Batch processing complete:")
+    logger.info("Batch processing complete:")
     logger.info(f"  Success: {success_count}")
     logger.info(f"  Errors: {error_count}")
-    
+
     return 0 if error_count == 0 else 1

@@ -2,15 +2,14 @@ import base64
 import json
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
-from flask import Flask, request, jsonify
-
-from faster_whisper import WhisperModel
 import vosk
+from faster_whisper import WhisperModel
+from flask import Flask, jsonify, request
 
-from talkat.config import load_app_config, CODE_DEFAULTS
+from talkat.config import CODE_DEFAULTS, load_app_config
 from talkat.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -19,63 +18,66 @@ app = Flask(__name__)
 
 # Global variable to hold the loaded model and its type
 MODEL: Any = None
-MODEL_TYPE: Optional[str] = None
-MODEL_REC: Any = None # For Vosk recognizer
+MODEL_TYPE: str | None = None
+MODEL_REC: Any = None  # For Vosk recognizer
+
 
 def initialize_model():
     global MODEL, MODEL_TYPE, MODEL_REC
     logger.info("Initializing model for the server...")
 
     config = load_app_config()
-    MODEL_TYPE = config.get('model_type', CODE_DEFAULTS['model_type'])
-    model_name = config.get('model_name', CODE_DEFAULTS['model_name'])
-    
+    MODEL_TYPE = config.get("model_type", CODE_DEFAULTS["model_type"])
+    model_name = config.get("model_name", CODE_DEFAULTS["model_name"])
+
     # Faster-Whisper specific args from config
-    model_cache_dir = config.get('faster_whisper_model_cache_dir')
-    fw_device = config.get('fw_device', CODE_DEFAULTS['fw_device'])
-    fw_compute_type = config.get('fw_compute_type', CODE_DEFAULTS['fw_compute_type'])
-    fw_device_index = config.get('fw_device_index', CODE_DEFAULTS['fw_device_index'])
-    
+    model_cache_dir = config.get("faster_whisper_model_cache_dir")
+    fw_device = config.get("fw_device", CODE_DEFAULTS["fw_device"])
+    fw_compute_type = config.get("fw_compute_type", CODE_DEFAULTS["fw_compute_type"])
+    fw_device_index = config.get("fw_device_index", CODE_DEFAULTS["fw_device_index"])
+
     # Vosk specific args from config
-    vosk_model_base_dir = config.get('vosk_model_base_dir', CODE_DEFAULTS['vosk_model_base_dir'])
+    vosk_model_base_dir = config.get("vosk_model_base_dir", CODE_DEFAULTS["vosk_model_base_dir"])
 
     if MODEL_TYPE == "vosk":
         if vosk is None:
             logger.error("Vosk library is not installed. Cannot load Vosk model.")
             sys.exit(1)
-        
+
         vosk_model_full_path = os.path.join(os.path.expanduser(vosk_model_base_dir), model_name)
         if not os.path.exists(vosk_model_full_path):
             logger.error(f"Vosk model not found at {vosk_model_full_path}. Server cannot start.")
             # Potentially download it here or provide better instructions.
             sys.exit(1)
-        
+
         logger.info(f"Loading Vosk model: {vosk_model_full_path}...")
         MODEL = vosk.Model(vosk_model_full_path)
         # MODEL_REC will be created per request or kept if suitable for concurrent use (Vosk docs needed)
         # For now, let's assume KaldiRecognizer might not be thread-safe or is better created per request.
         # If it can be reused, it should be initialized here.
         # Let's initialize it here assuming it can be reset or used for multiple inferences.
-        MODEL_REC = vosk.KaldiRecognizer(MODEL, 16000) # Assuming 16kHz sample rate
+        MODEL_REC = vosk.KaldiRecognizer(MODEL, 16000)  # Assuming 16kHz sample rate
         logger.info("Vosk model loaded.")
 
     elif MODEL_TYPE == "faster-whisper":
         if WhisperModel is None or np is None:
-            logger.error("faster-whisper or numpy is not installed. Cannot load faster-whisper model.")
+            logger.error(
+                "faster-whisper or numpy is not installed. Cannot load faster-whisper model."
+            )
             sys.exit(1)
-        
+
         logger.info(f"Loading faster-whisper model: {model_name}...")
-        model_kwargs: Dict[str, Any] = {
+        model_kwargs: dict[str, Any] = {
             "device": fw_device,
             "compute_type": fw_compute_type,
-            "device_index": fw_device_index
+            "device_index": fw_device_index,
         }
         if model_cache_dir:
             logger.info(f"Using model cache directory: {model_cache_dir}")
             model_kwargs["download_root"] = model_cache_dir
         else:
-            logger.info(f"Using default model cache directory for faster-whisper.")
-        
+            logger.info("Using default model cache directory for faster-whisper.")
+
         try:
             MODEL = WhisperModel(model_name, **model_kwargs)
             logger.info(f"Faster-whisper model '{model_name}' loaded.")
@@ -87,30 +89,31 @@ def initialize_model():
         logger.error(f"Unsupported model type in config: {MODEL_TYPE}. Server cannot start.")
         sys.exit(1)
 
-@app.route('/transcribe', methods=['POST'])
+
+@app.route("/transcribe", methods=["POST"])
 def transcribe_audio():
     global MODEL, MODEL_TYPE, MODEL_REC
     if not MODEL:
         return jsonify({"error": "Model not loaded"}), 500
 
     data = request.get_json()
-    if not data or 'audio_data_b64' not in data or 'rate' not in data:
+    if not data or "audio_data_b64" not in data or "rate" not in data:
         return jsonify({"error": "Missing audio_data_b64 or rate in request"}), 400
 
     try:
-        audio_bytes_b64 = data['audio_data_b64']
+        audio_bytes_b64 = data["audio_data_b64"]
         audio_bytes = base64.b64decode(audio_bytes_b64)
-        rate = int(data['rate']) # Client should send the correct rate
-        
+        int(data["rate"])  # Client should send the correct rate
+
         # For debugging:
         # print(f"Received {len(audio_bytes)} bytes of audio data, rate {rate} Hz.")
 
         text_result = ""
 
         if MODEL_TYPE == "vosk":
-            if not MODEL_REC: # Should have been initialized by initialize_model
-                 return jsonify({"error": "Vosk recognizer not initialized"}), 500
-            
+            if not MODEL_REC:  # Should have been initialized by initialize_model
+                return jsonify({"error": "Vosk recognizer not initialized"}), 500
+
             # Vosk's KaldiRecognizer needs to be reset or used carefully for multiple files.
             # If AcceptWaveform is called multiple times, it appends.
             # For a new transcription, ensure state is clean or create a new recognizer.
@@ -120,24 +123,22 @@ def transcribe_audio():
             # For now, assuming single client or careful management.
             # A new recognizer for each request is safest if unsure.
             # local_rec = vosk.KaldiRecognizer(MODEL, rate) # Create fresh recognizer
-            
+
             # Let's try using the global MODEL_REC and see. It might need locking for concurrent requests.
             # For now, process in chunks.
-            chunk_size = 4000 # This matches main.py, but might not be needed if sending whole audio
-            processed_once = False
             # The client sends the *entire* audio buffer.
             # We can feed it directly or in chunks if AcceptWaveform has limits.
             # Assuming we feed it all at once.
             if MODEL_REC.AcceptWaveform(audio_bytes):
-                final_json = MODEL_REC.Result() # Get partial result
+                final_json = MODEL_REC.Result()  # Get partial result
             else:
-                final_json = MODEL_REC.FinalResult() # Get final result after all data
-            
+                final_json = MODEL_REC.FinalResult()  # Get final result after all data
+
             result_dict = json.loads(final_json)
-            text_result = result_dict.get('text', '').strip()
+            text_result = result_dict.get("text", "").strip()
 
         elif MODEL_TYPE == "faster-whisper":
-            if not isinstance(MODEL, WhisperModel): # Type check for safety
+            if not isinstance(MODEL, WhisperModel):  # Type check for safety
                 return jsonify({"error": "Faster-whisper model not correctly loaded"}), 500
 
             # Convert audio_bytes (bytes) to NumPy array of floats
@@ -145,24 +146,28 @@ def transcribe_audio():
                 text_result = ""
             else:
                 audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-                segments, info = MODEL.transcribe(audio_np, beam_size=5) # beam_size from main.py
+                segments, info = MODEL.transcribe(audio_np, beam_size=5)  # beam_size from main.py
                 # print(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()
         else:
-            return jsonify({"error": f"Unsupported model type configured on server: {MODEL_TYPE}"}), 500
+            return jsonify(
+                {"error": f"Unsupported model type configured on server: {MODEL_TYPE}"}
+            ), 500
 
         return jsonify({"text": text_result})
 
     except Exception as e:
         logger.error(f"Error during transcription: {e}")
         import traceback
+
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-@app.route('/transcribe_stream', methods=['POST'])
+
+@app.route("/transcribe_stream", methods=["POST"])
 def transcribe_audio_stream():
-    global MODEL, MODEL_TYPE # MODEL_REC is not used here as we create a local one for Vosk streams
+    global MODEL, MODEL_TYPE  # MODEL_REC is not used here as we create a local one for Vosk streams
     if not MODEL:
         return jsonify({"error": "Model not loaded"}), 500
 
@@ -172,28 +177,28 @@ def transcribe_audio_stream():
         metadata_line = request.stream.readline()
         if not metadata_line:
             return jsonify({"error": "Missing metadata line in stream"}), 400
-        
+
         try:
-            metadata_str = metadata_line.decode('utf-8').strip()
+            metadata_str = metadata_line.decode("utf-8").strip()
             metadata = json.loads(metadata_str)
-            rate = int(metadata['rate'])
+            rate = int(metadata["rate"])
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             return jsonify({"error": f"Invalid or missing metadata: {e}"}), 400
 
         text_result = ""
 
         if MODEL_TYPE == "vosk":
-            if vosk is None: # Should have been checked at init, but good practice
+            if vosk is None:  # Should have been checked at init, but good practice
                 return jsonify({"error": "Vosk library not available"}), 500
-            
+
             # Create a new recognizer for this stream for proper isolation
             local_vosk_recognizer = vosk.KaldiRecognizer(MODEL, rate)
-            
+
             # Process audio chunks from the rest of the stream
             while True:
-                chunk = request.stream.read(4096) # Read in chunks
+                chunk = request.stream.read(4096)  # Read in chunks
                 if not chunk:
-                    break # End of stream
+                    break  # End of stream
                 # local_vosk_recognizer.AcceptWaveform(chunk)
                 if local_vosk_recognizer.AcceptWaveform(chunk):
                     # Optionally, could use PartialResult for intermediate feedback
@@ -202,10 +207,10 @@ def transcribe_audio_stream():
 
             final_json = local_vosk_recognizer.Result()
             result_dict = json.loads(final_json)
-            text_result = result_dict.get('text', '').strip()
+            text_result = result_dict.get("text", "").strip()
 
         elif MODEL_TYPE == "faster-whisper":
-            if not isinstance(MODEL, WhisperModel): # Type check
+            if not isinstance(MODEL, WhisperModel):  # Type check
                 return jsonify({"error": "Faster-whisper model not correctly loaded"}), 500
 
             audio_buffer = bytearray()
@@ -219,7 +224,7 @@ def transcribe_audio_stream():
                 # Client disconnected abruptly
                 logger.warning(f"Client disconnected during streaming: {e}")
                 return jsonify({"error": "Client disconnected"}), 499
-            
+
             audio_bytes = bytes(audio_buffer)
 
             if not audio_bytes:
@@ -229,22 +234,26 @@ def transcribe_audio_stream():
                 audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                 audio_np = np.ascontiguousarray(audio_np, dtype=np.float32)
                 # beam_size from main.py default, consider making it configurable for stream if needed
-                segments, info = MODEL.transcribe(audio_np, language="en", beam_size=3, best_of=3) 
+                segments, info = MODEL.transcribe(audio_np, language="en", beam_size=3, best_of=3)
                 # print(f"Streamed: Detected language '{info.language}' with probability {info.language_probability:.2f}")
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()
         else:
-            return jsonify({"error": f"Unsupported model type configured on server: {MODEL_TYPE}"}), 500
+            return jsonify(
+                {"error": f"Unsupported model type configured on server: {MODEL_TYPE}"}
+            ), 500
 
         return jsonify({"text": text_result})
 
     except Exception as e:
         logger.error(f"Error during streaming transcription: {e}")
         import traceback
+
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-@app.route('/health', methods=['GET'])
+
+@app.route("/health", methods=["GET"])
 def health_check():
     # Basic health check
     if MODEL:
@@ -252,9 +261,11 @@ def health_check():
     else:
         return jsonify({"status": "error", "message": "Model not loaded"}), 500
 
+
 def main():
     initialize_model()
-    app.run(host='127.0.0.1', port=5555)
+    app.run(host="127.0.0.1", port=5555)
+
 
 if __name__ == "__main__":
-    main() 
+    main()

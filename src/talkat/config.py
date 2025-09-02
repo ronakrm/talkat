@@ -1,7 +1,6 @@
-import os
 import json
-import sys
-from typing import Any, Dict
+import os
+from typing import Any
 
 from .logging_config import get_logger
 
@@ -12,7 +11,7 @@ CONFIG_DIR = os.path.expanduser("~/.config/talkat")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 # 1. CODE DEFAULTS
-CODE_DEFAULTS: Dict[str, Any] = {
+CODE_DEFAULTS: dict[str, Any] = {
     "silence_threshold": 200.0,
     "model_type": "faster-whisper",  # Options: faster-whisper, distil-whisper, vosk
     "model_name": "base.en",
@@ -30,7 +29,8 @@ CODE_DEFAULTS: Dict[str, Any] = {
     "device": "cpu",  # cpu, cuda, auto - defaulting to CPU for compatibility
 }
 
-def load_app_config() -> Dict[str, Any]:
+
+def load_app_config() -> dict[str, Any]:
     """Loads the application configuration from a JSON file.
     Merges with code defaults, file values taking precedence.
     """
@@ -38,7 +38,7 @@ def load_app_config() -> Dict[str, Any]:
     if os.path.exists(CONFIG_FILE):
         logger.debug(f"Loading config from {CONFIG_FILE}...")
         try:
-            with open(CONFIG_FILE, 'r') as f:
+            with open(CONFIG_FILE) as f:
                 file_config = json.load(f)
             config.update(file_config)
         except (json.JSONDecodeError, ValueError, TypeError) as e:
@@ -47,13 +47,13 @@ def load_app_config() -> Dict[str, Any]:
         logger.debug(f"No config file found at {CONFIG_FILE}. Using defaults.")
     return config
 
-def save_app_config(config_dict: Dict[str, Any]):
+
+def save_app_config(config_dict: dict[str, Any]):
     """Saves the application configuration to a JSON file."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     try:
-        with open(CONFIG_FILE, 'w') as f:
+        with open(CONFIG_FILE, "w") as f:
             json.dump(config_dict, f, indent=4)
         logger.info(f"Configuration saved to {CONFIG_FILE}")
-    except IOError as e:
+    except OSError as e:
         logger.error(f"Error saving config to {CONFIG_FILE}: {e}")
-

@@ -18,8 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Multimedia :: Sound/Audio :: Speech",
-    "Topic :: Accessibility"
+    "Topic :: Multimedia :: Sound/Audio :: Speech"
 ]
 dependencies = [
     "faster-whisper>=1.1.1",
@@ -35,15 +34,6 @@ dependencies = [
     "soundfile>=0.12.1"
 ]
 
-# Install CPU-only torch to avoid large GPU dependencies
-# Users can override with: pip install torch --index-url https://download.pytorch.org/whl/cu118
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-
 [project.urls]
 Homepage = "https://github.com/yourusername/talkat"
 Documentation = "https://github.com/yourusername/talkat/blob/main/README.md"
@@ -53,10 +43,88 @@ Issues = "https://github.com/yourusername/talkat/issues"
 [project.scripts]
 talkat = "talkat.cli:main"
 
+# Install CPU-only torch to avoid large GPU dependencies
+# Users can override with: pip install torch --index-url https://download.pytorch.org/whl/cu118
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+
 [tool.uv]
-dev-dependencies = []
+dev-dependencies = [
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.5.0",
+    "types-requests>=2.31.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0"
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Ruff configuration
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501", # line too long (handled by formatter)
+    "E701", # multiple statements on one line (colon)
+    "B008", # do not perform function calls in argument defaults
+    "ARG001", # unused arguments (common in callback signatures)
+    "SIM102", # nested if statements
+    "SIM105", # contextlib.suppress
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # unused imports in __init__ files are ok
+
+[tool.ruff.lint.isort]
+known-first-party = ["talkat"]
+
+# Mypy configuration
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # Start lenient, will make stricter
+check_untyped_defs = true
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "pyaudio.*",
+    "vosk.*",
+    "faster_whisper.*",
+    "transformers.*",
+    "librosa.*",
+    "soundfile.*"
+]
+ignore_missing_imports = true

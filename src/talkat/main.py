@@ -15,6 +15,7 @@ import requests  # Added for HTTP calls
 
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
 from .logging_config import get_logger
+from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager, setup_signal_handlers
 from .record import calibrate_microphone, stream_audio_with_vad
 
@@ -24,9 +25,7 @@ logger = get_logger(__name__)
 def get_transcript_dir() -> Path:
     """Get or create the transcript directory."""
     config = load_app_config()
-    transcript_dir_str = config.get(
-        "transcript_dir", os.path.expanduser("~/.local/share/talkat/transcripts")
-    )
+    transcript_dir_str = config.get("transcript_dir", str(TRANSCRIPT_DIR))
     transcript_dir = Path(os.path.expanduser(transcript_dir_str))
     transcript_dir.mkdir(parents=True, exist_ok=True)
     return transcript_dir
@@ -153,7 +152,7 @@ def run_listen_command(
     fw_device: str = "cpu",
     fw_compute_type: str = "int8",
     fw_device_index: int | list[int] = 0,
-    vosk_model_base_dir: str = "~/.local/share/vosk",  # New parameter for Vosk model base
+    vosk_model_base_dir: str | None = None,  # New parameter for Vosk model base
 ) -> int:
     """Runs the main speech-to-text process by sending audio to a model server."""
 
@@ -339,7 +338,7 @@ def run_long_dictation_command(
     fw_device: str = "cpu",
     fw_compute_type: str = "int8",
     fw_device_index: int | list[int] = 0,
-    vosk_model_base_dir: str = "~/.local/share/vosk",
+    vosk_model_base_dir: str | None = None,
     clipboard: bool = True,
 ):
     """Runs long dictation mode with continuous speech recognition."""

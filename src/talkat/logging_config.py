@@ -5,12 +5,11 @@ import logging.handlers
 import sys
 from pathlib import Path
 
+from .paths import LOG_DIR
+
 # Default log format
 DEFAULT_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 SIMPLE_FORMAT = "%(levelname)s: %(message)s"
-
-# Log file location
-LOG_DIR = Path.home() / ".local" / "share" / "talkat" / "logs"
 
 
 def setup_logging(

@@ -8,12 +8,9 @@ import time
 from pathlib import Path
 
 from .logging_config import get_logger
+from .paths import LOCK_DIR, PID_DIR
 
 logger = get_logger(__name__)
-
-# Process state directory
-RUNTIME_DIR = Path.home() / ".cache" / "talkat"
-RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class ProcessManager:
@@ -27,8 +24,8 @@ class ProcessManager:
             process_name: Name of the process (e.g., 'listen', 'long')
         """
         self.process_name = process_name
-        self.pid_file = RUNTIME_DIR / f"{process_name}.pid"
-        self.lock_file = RUNTIME_DIR / f"{process_name}.lock"
+        self.pid_file = PID_DIR / f"{process_name}.pid"
+        self.lock_file = LOCK_DIR / f"{process_name}.lock"
         self._lock_fd: int | None = None
 
     def acquire_lock(self, timeout: float = 1.0) -> bool:

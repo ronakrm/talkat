@@ -7,6 +7,7 @@ from pathlib import Path
 import requests
 
 from .logging_config import get_logger
+from .security import safe_subprocess_run, validate_file_path
 
 logger = get_logger(__name__)
 
@@ -25,10 +26,11 @@ def transcribe_audio_file(
     Returns:
         Tuple of (transcription, duration in seconds)
     """
-    file_path_obj = Path(file_path)
-
-    if not file_path_obj.exists():
-        raise FileNotFoundError(f"Audio file not found: {file_path_obj}")
+    # Validate and sanitize file path
+    try:
+        file_path_obj = validate_file_path(file_path, must_exist=True)
+    except Exception as e:
+        raise FileNotFoundError(f"Invalid audio file: {e}") from e
 
     # Check file extension
     supported_formats = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".mp4", ".webm"}
@@ -189,7 +191,7 @@ def process_audio_file_command(
 
                 # Try wl-copy first (Wayland)
                 try:
-                    subprocess.run(
+                    safe_subprocess_run(
                         ["wl-copy"],
                         input=transcription.encode("utf-8"),
                         check=True,
@@ -199,7 +201,7 @@ def process_audio_file_command(
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     # Fallback to xclip (X11)
                     try:
-                        subprocess.run(
+                        safe_subprocess_run(
                             ["xclip", "-selection", "clipboard"],
                             input=transcription.encode("utf-8"),
                             check=True,

@@ -1,7 +1,6 @@
 import collections
 import contextlib
 import os
-import subprocess
 import warnings
 from collections.abc import Generator
 
@@ -11,6 +10,7 @@ import pyaudio
 from .config import load_app_config
 from .devices import find_microphone
 from .logging_config import get_logger
+from .security import safe_subprocess_run
 
 logger = get_logger(__name__)
 
@@ -44,7 +44,7 @@ def calibrate_microphone(duration: int = 10) -> float:
 
     # Show notification if possible
     with contextlib.suppress(FileNotFoundError):
-        subprocess.run(
+        safe_subprocess_run(
             [
                 "notify-send",
                 "Talkat Calibration",
@@ -150,7 +150,7 @@ def calibrate_microphone(duration: int = 10) -> float:
 
     # Show notification with result
     with contextlib.suppress(FileNotFoundError):
-        subprocess.run(
+        safe_subprocess_run(
             ["notify-send", "Calibration Complete", f"Threshold set to {threshold:.0f}"],
             check=False,
             capture_output=True,
@@ -185,7 +185,7 @@ def record_audio_with_vad(
     if mic_index is None:
         logger.error("No microphone found!")
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
+            safe_subprocess_run(
                 ["notify-send", "Talkat", "No microphone found for recording!"], check=False
             )
         return None
@@ -206,7 +206,7 @@ def record_audio_with_vad(
         if p:
             p.terminate()
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
+            safe_subprocess_run(
                 ["notify-send", "Talkat", f"Error opening audio stream: {e}"], check=False
             )
         return None
@@ -217,7 +217,7 @@ def record_audio_with_vad(
     logger.info("Speak now!")
 
     try:
-        subprocess.run(["notify-send", "Talkat", "Listening... Speak now!"], check=False)
+        safe_subprocess_run(["notify-send", "Talkat", "Listening... Speak now!"], check=False)
     except FileNotFoundError:
         pass  # notify-send is optional
 
@@ -330,7 +330,7 @@ def record_audio_with_vad(
         if debug:
             logger.debug("No speech segments recorded.")
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(["notify-send", "Talkat", "No speech detected."], check=False)
+            safe_subprocess_run(["notify-send", "Talkat", "No speech detected."], check=False)
         return None
 
     final_audio_data: bytes = b"".join(recorded_audio_segments)
@@ -382,7 +382,7 @@ def stream_audio_with_vad(
     if mic_index is None:
         logger.error("No microphone found for streaming!")
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
+            safe_subprocess_run(
                 ["notify-send", "Talkat", "No microphone found for streaming!"], check=False
             )
         return  # End generator if no mic
@@ -403,7 +403,7 @@ def stream_audio_with_vad(
         if p:
             p.terminate()
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
+            safe_subprocess_run(
                 ["notify-send", "Talkat", f"Error opening audio stream: {e}"], check=False
             )
         return  # End generator
@@ -423,7 +423,7 @@ def stream_audio_with_vad(
         logger.debug("Speak now for streaming!")
 
     with contextlib.suppress(FileNotFoundError):
-        subprocess.run(["notify-send", "Talkat", "Streaming... Speak now!"], check=False)
+        safe_subprocess_run(["notify-send", "Talkat", "Streaming... Speak now!"], check=False)
 
     num_pre_padding_chunks: int = int(PRE_SPEECH_PADDING_DURATION * RATE / CHUNK_SAMPLES)
     pre_speech_buffer: collections.deque[bytes] = collections.deque(maxlen=num_pre_padding_chunks)

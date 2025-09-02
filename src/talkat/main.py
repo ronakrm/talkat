@@ -18,6 +18,11 @@ from .logging_config import get_logger
 from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager, setup_signal_handlers
 from .record import calibrate_microphone, stream_audio_with_vad
+from .security import (
+    safe_subprocess_run,
+    sanitize_text_for_clipboard,
+    sanitize_text_for_typing,
+)
 
 logger = get_logger(__name__)
 
@@ -45,16 +50,21 @@ def save_transcript(text: str, mode: str = "short") -> Path:
 
 def copy_to_clipboard(text: str) -> bool:
     """Copy text to clipboard using wl-copy or xclip."""
+    # Sanitize text before copying
+    text = sanitize_text_for_clipboard(text)
+
     # Try wl-copy first (Wayland)
     try:
-        subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
+        safe_subprocess_run(["wl-copy"], input=text.encode("utf-8"), check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
     # Try xclip as fallback (X11)
     try:
-        subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True)
+        safe_subprocess_run(
+            ["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True
+        )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
@@ -118,7 +128,7 @@ def ensure_model_exists(model_path: str) -> bool:
         logger.error(f"Model not found at {model_path}")
         logger.error("Please run the setup script to download the model.")
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(["notify-send", "Talkat", "Model not found"], check=False)
+            safe_subprocess_run(["notify-send", "Talkat", "Model not found"], check=False)
         return False
     return True
 
@@ -137,7 +147,7 @@ def run_calibration_command(current_config: dict[str, Any]):
     save_app_config(config_to_save)
     logger.info(f"Calibration complete. Threshold set to: {threshold:.1f}")
     with contextlib.suppress(FileNotFoundError):
-        subprocess.run(
+        safe_subprocess_run(
             ["notify-send", "Talkat", f"Calibration complete. Threshold: {threshold:.1f}"],
             check=False,
         )
@@ -223,18 +233,20 @@ def run_listen_command(
                 # This also handles if the generator is empty (no speech detected from the start)
                 logger.warning("No speech detected or audio input error.")
                 with contextlib.suppress(FileNotFoundError):
-                    subprocess.run(["notify-send", "Talkat", "No speech detected"], check=False)
+                    safe_subprocess_run(
+                        ["notify-send", "Talkat", "No speech detected"], check=False
+                    )
                 return 0  # Exit if no rate / no audio
         except StopIteration:  # Generator was empty
             logger.warning("No speech detected (empty audio stream).")
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(["notify-send", "Talkat", "No speech detected"], check=False)
+                safe_subprocess_run(["notify-send", "Talkat", "No speech detected"], check=False)
             return 0
 
         logger.info(f"Speech detected. Streaming audio at {sample_rate} Hz to model server...")
         logger.info("(Run 'talkat listen' again to stop recording)")
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
+            safe_subprocess_run(
                 ["notify-send", "Talkat", 'Recording... Run "talkat listen" again to stop'],
                 check=False,
             )
@@ -266,21 +278,21 @@ def run_listen_command(
                 "Please ensure the model server is running: python -m src.talkat.model_server"
             )
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(
+                safe_subprocess_run(
                     ["notify-send", "Talkat", "Error: Model server not reachable."], check=False
                 )
             return 1
         except requests.exceptions.Timeout:
             logger.error("Request to model server timed out.")
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(
+                safe_subprocess_run(
                     ["notify-send", "Talkat", "Error: Model server timeout."], check=False
                 )
             return 1
         except requests.exceptions.RequestException as e:
             logger.error(f"Error communicating with model server: {e}")
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(
+                safe_subprocess_run(
                     ["notify-send", "Talkat", f"Server communication error: {e}"], check=False
                 )
             return 1
@@ -298,19 +310,25 @@ def run_listen_command(
                 logger.info(f"Transcript saved to: {transcript_path}")
 
             try:
-                subprocess.run(["ydotool", "type", "--key-delay=1", text], check=True)
+                # Sanitize text before typing
+                safe_text = sanitize_text_for_typing(text)
+                safe_subprocess_run(["ydotool", "type", "--key-delay=1", safe_text], check=True)
                 logger.info(f"Typed: {text}")
                 with contextlib.suppress(FileNotFoundError):
-                    subprocess.run(["notify-send", "Talkat", f"Typed: {text}"], check=False)
+                    safe_subprocess_run(
+                        ["notify-send", "Talkat", f"Typed: {text[:100]}"], check=False
+                    )
             except (subprocess.CalledProcessError, FileNotFoundError):
                 logger.warning("ydotool not available, printing text instead:")
                 print(f"TEXT: {text}")
                 with contextlib.suppress(FileNotFoundError):
-                    subprocess.run(["notify-send", "Talkat", f"Recognized: {text}"], check=False)
+                    safe_subprocess_run(
+                        ["notify-send", "Talkat", f"Recognized: {text[:100]}"], check=False
+                    )
         else:
             logger.warning("No text recognized in the audio")
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(["notify-send", "Talkat", "No text recognized"], check=False)
+                safe_subprocess_run(["notify-send", "Talkat", "No text recognized"], check=False)
 
         cleanup_pid()
         return 0
@@ -325,7 +343,7 @@ def run_listen_command(
 
         traceback.print_exc()
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(["notify-send", "Talkat", f"Error: {e}"], check=False)
+            safe_subprocess_run(["notify-send", "Talkat", f"Error: {e}"], check=False)
         cleanup_pid()
         return 1
 
@@ -383,7 +401,7 @@ def run_long_dictation_command(
         logger.info("Transcript will be copied to clipboard when finished.")
 
     with contextlib.suppress(FileNotFoundError):
-        subprocess.run(
+        safe_subprocess_run(
             ["notify-send", "Talkat", "Long dictation mode started. Press Ctrl+C to stop."],
             check=False,
         )
@@ -448,7 +466,7 @@ def run_long_dictation_command(
                 logger.error(f"Could not connect to the model server at {server_url}.")
                 logger.error("Please ensure the model server is running: talkat server")
                 with contextlib.suppress(FileNotFoundError):
-                    subprocess.run(
+                    safe_subprocess_run(
                         ["notify-send", "Talkat", "Error: Model server not reachable."], check=False
                     )
                 return 1
@@ -472,7 +490,7 @@ def run_long_dictation_command(
             if copy_to_clipboard(full_text):
                 logger.info("Transcript copied to clipboard!")
                 with contextlib.suppress(FileNotFoundError):
-                    subprocess.run(
+                    safe_subprocess_run(
                         ["notify-send", "Talkat", "Transcript copied to clipboard"], check=False
                     )
             else:
@@ -482,7 +500,7 @@ def run_long_dictation_command(
         logger.info(f"Total words: {len(full_text.split())}")
 
         with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
+            safe_subprocess_run(
                 [
                     "notify-send",
                     "Talkat",

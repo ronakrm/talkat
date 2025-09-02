@@ -2,7 +2,6 @@
 
 import argparse
 import contextlib
-import subprocess
 import sys
 
 from .file_processor import batch_process_files, process_audio_file_command
@@ -10,6 +9,7 @@ from .logging_config import get_logger, setup_logging
 from .main import main as client_main
 from .model_server import main as server_main
 from .process_manager import ProcessManager
+from .security import safe_subprocess_run
 
 logger = get_logger(__name__)
 
@@ -35,7 +35,9 @@ def start_long_background() -> int:
         if pid:
             logger.info(f"Long dictation started in background (PID: {pid})")
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(["notify-send", "Talkat", "Long dictation started"], check=False)
+                safe_subprocess_run(
+                    ["notify-send", "Talkat", "Long dictation started"], check=False
+                )
             return 0
         else:
             logger.error("Failed to start long dictation")
@@ -49,7 +51,9 @@ def stop_long_background() -> int:
     with pm:
         if pm.stop_process():
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(["notify-send", "Talkat", "Long dictation stopped"], check=False)
+                safe_subprocess_run(
+                    ["notify-send", "Talkat", "Long dictation stopped"], check=False
+                )
             return 0
         else:
             return 1
@@ -80,7 +84,7 @@ def stop_listen_process() -> int:
     with pm:
         if pm.stop_process():
             with contextlib.suppress(FileNotFoundError):
-                subprocess.run(
+                safe_subprocess_run(
                     ["notify-send", "Talkat", "Recording stopped, transcribing..."], check=False
                 )
             return 0

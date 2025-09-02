@@ -41,6 +41,8 @@ def load_app_config() -> dict[str, Any]:
     """Loads the application configuration from a JSON file.
     Merges with code defaults, file values taking precedence.
     """
+    from .security import validate_json_config
+
     config = CODE_DEFAULTS.copy()
     config_file = get_config_file()
 
@@ -49,6 +51,8 @@ def load_app_config() -> dict[str, Any]:
         try:
             with open(config_file) as f:
                 file_config = json.load(f)
+            # Validate the loaded config
+            file_config = validate_json_config(file_config)
             config.update(file_config)
         except (json.JSONDecodeError, ValueError, TypeError) as e:
             logger.error(f"Error loading config from {config_file}: {e}. Using defaults.")
@@ -59,6 +63,11 @@ def load_app_config() -> dict[str, Any]:
 
 def save_app_config(config_dict: dict[str, Any]):
     """Saves the application configuration to a JSON file."""
+    from .security import validate_json_config
+
+    # Validate config before saving
+    config_dict = validate_json_config(config_dict)
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     try:
         with open(CONFIG_FILE, "w") as f:

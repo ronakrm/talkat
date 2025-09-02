@@ -2,22 +2,39 @@ import pyaudio
 import subprocess
 import numpy as np
 import warnings
+import os
 from typing import Optional, Tuple, Generator, Union, List, Deque
 import collections
 
 from .devices import find_microphone
+from .logging_config import get_logger
+from .config import load_app_config
 
-# Suppress ALSA warnings
-warnings.filterwarnings("ignore", category=Warning)
+logger = get_logger(__name__)
+
+# Suppress ALSA-specific warnings only
+# These are harmless warnings from the ALSA library that we can't control
+if os.name == 'posix':  # Only on Linux/Unix systems
+    from ctypes import c_char_p, c_int, cdll
+    try:
+        # Try to redirect ALSA error messages
+        ERROR_HANDLER_FUNC = lambda: None
+        asound = cdll.LoadLibrary('libasound.so.2')
+        asound.snd_lib_error_set_handler(ERROR_HANDLER_FUNC)
+    except (OSError, AttributeError):
+        # Fallback: suppress PyAudio warnings if ALSA redirect fails
+        warnings.filterwarnings("ignore", message=".*ALSA.*", category=RuntimeWarning)
+        warnings.filterwarnings("ignore", message=".*jack.*", category=RuntimeWarning)
 
 def calibrate_microphone(duration: int = 10) -> float:
     """Calibrates the microphone to determine an appropriate silence threshold using background noise analysis."""
     
-    # Audio configuration constants
-    CHUNK = 1024
+    # Load audio configuration from config or use defaults
+    config = load_app_config()
+    CHUNK = config.get('audio_chunk_size', 1024)
     FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
+    CHANNELS = config.get('audio_channels', 1)
+    RATE = config.get('audio_sample_rate', 16000)
     
     # Show notification if possible
     try:
@@ -29,16 +46,16 @@ def calibrate_microphone(duration: int = 10) -> float:
     except FileNotFoundError:
         pass
     
-    print("\n" + "="*60)
-    print("MICROPHONE CALIBRATION - Background Noise Analysis")
-    print("="*60)
-    print(f"Please remain QUIET during calibration ({duration} seconds).")
-    print("Measuring ambient noise levels...")
-    print("-"*60)
+    logger.info("\n" + "="*60)
+    logger.info("MICROPHONE CALIBRATION - Background Noise Analysis")
+    logger.info("="*60)
+    logger.info(f"Please remain QUIET during calibration ({duration} seconds).")
+    logger.info("Measuring ambient noise levels...")
+    logger.info("-"*60)
     
     mic_index: Optional[int] = find_microphone()
     if mic_index is None:
-        print("No microphone found during calibration, using default threshold.")
+        logger.warning("No microphone found during calibration, using default threshold.")
         return 500.0  # Default fallback as float
     
     p = pyaudio.PyAudio()
@@ -51,7 +68,7 @@ def calibrate_microphone(duration: int = 10) -> float:
                        input_device_index=mic_index,
                        frames_per_buffer=CHUNK)
     except Exception as e:
-        print(f"Error opening audio stream for calibration: {e}")
+        logger.error(f"Error opening audio stream for calibration: {e}")
         p.terminate()
         return 500.0
     
@@ -71,12 +88,12 @@ def calibrate_microphone(duration: int = 10) -> float:
             bar_length = 40
             filled = int(bar_length * progress)
             bar = '█' * filled + '░' * (bar_length - filled)
-            print(f"\rProgress: [{bar}] {progress*100:.0f}% | Current: {volume:6.1f}", end="", flush=True)
+            print(f"\rProgress: [{bar}] {progress*100:.0f}% | Current: {volume:6.1f}", end="", flush=True)  # Keep print for real-time progress display
     finally:
         stream.stop_stream()
         stream.close()
         p.terminate()
-        print()  # New line after progress bar
+        logger.info("")  # New line after progress bar
     
     if not volumes:
         return 500.0
@@ -102,20 +119,20 @@ def calibrate_microphone(duration: int = 10) -> float:
     # But ensure it's at least some minimum value
     threshold = max(threshold, 50.0)
     
-    print("\n" + "-"*60)
-    print("CALIBRATION RESULTS:")
-    print("-"*60)
-    print(f"  Background Noise Analysis:")
-    print(f"    Min volume:         {min_vol:8.1f}")
-    print(f"    50th percentile:    {p50:8.1f} (median)")
-    print(f"    75th percentile:    {p75:8.1f}")
-    print(f"    90th percentile:    {noise_floor:8.1f} ← NOISE FLOOR")
-    print(f"    95th percentile:    {p95:8.1f}")
-    print(f"    99th percentile:    {p99:8.1f}")
-    print(f"    Max volume:         {max_vol:8.1f}")
-    print(f"\n  Recommended threshold: {threshold:8.1f}")
-    print(f"  (95th percentile - ignores top 5% noise spikes)")
-    print("="*60)
+    logger.info("\n" + "-"*60)
+    logger.info("CALIBRATION RESULTS:")
+    logger.info("-"*60)
+    logger.info(f"  Background Noise Analysis:")
+    logger.info(f"    Min volume:         {min_vol:8.1f}")
+    logger.info(f"    50th percentile:    {p50:8.1f} (median)")
+    logger.info(f"    75th percentile:    {p75:8.1f}")
+    logger.info(f"    90th percentile:    {noise_floor:8.1f} ← NOISE FLOOR")
+    logger.info(f"    95th percentile:    {p95:8.1f}")
+    logger.info(f"    99th percentile:    {p99:8.1f}")
+    logger.info(f"    Max volume:         {max_vol:8.1f}")
+    logger.info(f"\n  Recommended threshold: {threshold:8.1f}")
+    logger.info(f"  (95th percentile - ignores top 5% noise spikes)")
+    logger.info("="*60)
     
     # Show notification with result
     try:
@@ -142,12 +159,12 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
 
     if silence_threshold is None:
         # This path should ideally not be hit if main.py provides a threshold.
-        print("Warning: silence_threshold not provided to record_audio_with_vad. Using a default fallback.")
+        logger.warning("silence_threshold not provided to record_audio_with_vad. Using a default fallback.")
         silence_threshold = 500.0 
     
     mic_index: Optional[int] = find_microphone()
     if mic_index is None:
-        print("No microphone found!")
+        logger.error("No microphone found!")
         try:
             subprocess.run(['notify-send', 'Talkat', 'No microphone found for recording!'], check=False)
         except FileNotFoundError:
@@ -164,7 +181,7 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
                        input_device_index=mic_index,
                        frames_per_buffer=CHUNK)
     except Exception as e:
-        print(f"Error opening audio stream: {e}")
+        logger.error(f"Error opening audio stream: {e}")
         if p: p.terminate()
         try:
             subprocess.run(['notify-send', 'Talkat', f'Error opening audio stream: {e}'], check=False)
@@ -172,8 +189,8 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
             pass
         return None
     
-    print(f"Listening with threshold {silence_threshold:.1f}, silence duration {silence_duration:.1f}s...")
-    print("Speak now!")
+    logger.info(f"Listening with threshold {silence_threshold:.1f}, silence duration {silence_duration:.1f}s...")
+    logger.info("Speak now!")
     
     try:
         subprocess.run(['notify-send', 'Talkat', 'Listening... Speak now!'], check=False)
@@ -204,15 +221,15 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
                 total_chunks_processed += 1
             except IOError as e: # More specific exception for stream read errors
                 if e.errno == pyaudio.paInputOverflowed:
-                    if debug: print("Input overflowed. Skipping frame.")
+                    if debug: logger.debug("Input overflowed. Skipping frame.")
                     continue # Skip this chunk and continue
-                print(f"Error reading audio: {e}")
+                logger.error(f"Error reading audio: {e}")
                 break # Critical read error
 
             audio_data = np.frombuffer(data, dtype=np.int16)
             # Handle empty audio_data if read fails or returns empty
             if audio_data.size == 0:
-                if debug: print("Empty audio data received.")
+                if debug: logger.debug("Empty audio data received.")
                 continue
 
             volume = np.sqrt(np.mean(audio_data.astype(np.float32)**2)) # Use float32 for mean calculation to avoid overflow
@@ -226,11 +243,11 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
             if debug and total_chunks_processed % 10 == 0: # Print more frequently for debugging if needed
                 silent_time = silent_chunks_count * CHUNK / RATE
                 max_silent_time = max_silent_chunks_to_stop * CHUNK / RATE
-                print(f"Chunk {total_chunks_processed}: Vol: {volume:.1f} Smooth: {smoothed_volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
+                logger.debug(f"Chunk {total_chunks_processed}: Vol: {volume:.1f} Smooth: {smoothed_volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
 
             if smoothed_volume > silence_threshold:
                 if not is_speaking: # Transition to speaking
-                    if debug: print(f"Speech detected! Volume: {volume:.1f}")
+                    if debug: logger.debug(f"Speech detected! Volume: {volume:.1f}")
                     is_speaking = True
                     current_segment_frames.extend(list(pre_speech_buffer)) # Add pre-buffered audio
                     # pre_speech_buffer.clear() # Clear it after use for this segment
@@ -243,7 +260,7 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
                     current_segment_frames.append(data) # Continue recording this silence
                     silent_chunks_count += 1
                     if silent_chunks_count > max_silent_chunks_to_stop:
-                        if debug: print("Silence duration exceeded after speech, segment finished.")
+                        if debug: logger.debug("Silence duration exceeded after speech, segment finished.")
                         recorded_audio_segments.append(b''.join(current_segment_frames))
                         current_segment_frames = []
                         is_speaking = False # Reset for potential next utterance, though app breaks
@@ -253,7 +270,7 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
                     pre_speech_buffer.append(data)
         
         if total_chunks_processed >= max_total_chunks:
-            if debug: print("Maximum recording duration reached.")
+            if debug: logger.debug("Maximum recording duration reached.")
 
     finally:
         if stream:
@@ -262,16 +279,16 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
         if p:
             p.terminate()
 
-    if debug: print(f"Recording loop finished. Processed {total_chunks_processed} chunks.")
+    if debug: logger.debug(f"Recording loop finished. Processed {total_chunks_processed} chunks.")
 
     # If recording was active and current_segment_frames has data (e.g. due to timeout),
     # finalize this last segment.
     if current_segment_frames:
-        if debug: print("Finalizing current (potentially incomplete) speech segment.")
+        if debug: logger.debug("Finalizing current (potentially incomplete) speech segment.")
         recorded_audio_segments.append(b''.join(current_segment_frames))
 
     if not recorded_audio_segments:
-        if debug: print(f"No speech segments recorded.")
+        if debug: logger.debug(f"No speech segments recorded.")
         try:
             subprocess.run(['notify-send', 'Talkat', 'No speech detected.'], check=False)
         except FileNotFoundError:
@@ -281,10 +298,10 @@ def record_audio_with_vad(silence_threshold: Optional[float] = None, silence_dur
     final_audio_data: bytes = b''.join(recorded_audio_segments)
     
     if not final_audio_data: # Should be redundant given the check above
-        if debug: print(f"Final audio data is empty.") # Should not happen
+        if debug: logger.debug(f"Final audio data is empty.")  # Should not happen
         return None
 
-    if debug: print(f"Recorded {len(final_audio_data)} bytes of audio.")
+    if debug: logger.debug(f"Recorded {len(final_audio_data)} bytes of audio.")
     return final_audio_data, RATE
 
 # New function for streaming with VAD
@@ -310,7 +327,7 @@ def stream_audio_with_vad(
     MAX_RECORDING_DURATION_SECONDS: float = max_duration if max_duration is not None else float('inf')
 
     if silence_threshold is None:
-        print("Warning: silence_threshold not provided to stream_audio_with_vad. Using a default fallback.")
+        logger.warning("silence_threshold not provided to stream_audio_with_vad. Using a default fallback.")
         silence_threshold = 500.0
     
     # If silence_threshold is 0, disable VAD and stream continuously
@@ -318,7 +335,7 @@ def stream_audio_with_vad(
     
     mic_index: Optional[int] = find_microphone()
     if mic_index is None:
-        print("No microphone found for streaming!")
+        logger.error("No microphone found for streaming!")
         try:
             subprocess.run(['notify-send', 'Talkat', 'No microphone found for streaming!'], check=False)
         except FileNotFoundError:
@@ -335,7 +352,7 @@ def stream_audio_with_vad(
                        input_device_index=mic_index,
                        frames_per_buffer=CHUNK_SAMPLES) # Use CHUNK_SAMPLES
     except Exception as e:
-        print(f"Error opening audio stream for streaming: {e}")
+        logger.error(f"Error opening audio stream for streaming: {e}")
         if p: p.terminate()
         try:
             subprocess.run(['notify-send', 'Talkat', f'Error opening audio stream: {e}'], check=False)
@@ -347,10 +364,10 @@ def stream_audio_with_vad(
     yield RATE
 
     if no_vad_mode:
-        print(f"Streaming continuously without VAD (max duration: {MAX_RECORDING_DURATION_SECONDS:.0f}s)...")
+        logger.info(f"Streaming continuously without VAD (max duration: {MAX_RECORDING_DURATION_SECONDS:.0f}s)...")
     else:
-        print(f"Streaming with threshold {silence_threshold:.1f}, silence duration {silence_duration:.1f}s...")
-    if debug: print("Speak now for streaming!")
+        logger.info(f"Streaming with threshold {silence_threshold:.1f}, silence duration {silence_duration:.1f}s...")
+    if debug: logger.debug("Speak now for streaming!")
     
     try:
         subprocess.run(['notify-send', 'Talkat', 'Streaming... Speak now!'], check=False)
@@ -383,14 +400,14 @@ def stream_audio_with_vad(
                 total_chunks_processed += 1
             except IOError as e:
                 if e.errno == pyaudio.paInputOverflowed:
-                    if debug: print("Input overflowed during streaming. Skipping frame.")
+                    if debug: logger.debug("Input overflowed during streaming. Skipping frame.")
                     continue
-                print(f"Error reading audio for streaming: {e}")
+                logger.error(f"Error reading audio for streaming: {e}")
                 break 
 
             audio_data_np = np.frombuffer(data, dtype=np.int16)
             if audio_data_np.size == 0:
-                if debug: print("Empty audio data received during streaming.")
+                if debug: logger.debug("Empty audio data received during streaming.")
                 continue
 
             volume = np.sqrt(np.mean(audio_data_np.astype(np.float32)**2))
@@ -404,7 +421,7 @@ def stream_audio_with_vad(
             if debug and total_chunks_processed % (int(1000/chunk_size_ms) // 2) == 0: # Log roughly every 0.5s
                 silent_time = silent_chunks_count * chunk_size_ms / 1000.0
                 max_silent_time = max_silent_chunks_to_stop * chunk_size_ms / 1000.0
-                print(f"Stream chunk {total_chunks_processed}: Vol: {volume:.1f} Smooth: {smoothed_volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
+                logger.debug(f"Stream chunk {total_chunks_processed}: Vol: {volume:.1f} Smooth: {smoothed_volume:.1f} (Thr: {silence_threshold:.1f}) Silent: {silent_time:.1f}s/{max_silent_time:.1f}s Speaking: {is_speaking}")
 
             if no_vad_mode:
                 # In no-VAD mode, just yield all audio continuously
@@ -413,7 +430,7 @@ def stream_audio_with_vad(
                 # Normal VAD mode - use smoothed volume for decision making
                 if smoothed_volume > silence_threshold:
                     if not is_speaking: # Transition to speaking
-                        if debug: print(f"Speech detected for streaming! Volume: {volume:.1f}")
+                        if debug: logger.debug(f"Speech detected for streaming! Volume: {volume:.1f}")
                         is_speaking = True
                         # Yield pre-buffered audio first
                         for pre_chunk in list(pre_speech_buffer):
@@ -429,14 +446,14 @@ def stream_audio_with_vad(
                         yield data # Yield this silence as part of the speech
                         silent_chunks_count += 1
                         if silent_chunks_count > max_silent_chunks_to_stop:
-                            if debug: print("Silence duration exceeded after speech, stopping stream.")
+                            if debug: logger.debug("Silence duration exceeded after speech, stopping stream.")
                             break # Stop streaming after this utterance
                     elif not speech_has_started_and_padded: # Only buffer if we haven't started speech & padding yet
                         # Still not speaking, keep adding to pre_speech_buffer
                         pre_speech_buffer.append(data)
         
         if total_chunks_processed >= max_total_chunks:
-            if debug: print("Maximum recording duration reached for stream.")
+            if debug: logger.debug("Maximum recording duration reached for stream.")
 
     finally:
         if stream:
@@ -444,4 +461,4 @@ def stream_audio_with_vad(
             stream.close()
         if p:
             p.terminate()
-        if debug: print(f"Streaming loop finished. Processed {total_chunks_processed} chunks.")
+        if debug: logger.debug(f"Streaming loop finished. Processed {total_chunks_processed} chunks.")

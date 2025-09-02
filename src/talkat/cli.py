@@ -8,122 +8,93 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
+from .logging_config import setup_logging, get_logger
 from .main import main as client_main
 from .model_server import main as server_main
 from .file_processor import process_audio_file_command, batch_process_files
+from .process_manager import ProcessManager, setup_signal_handlers
 
-# PID file locations
-PID_FILE = Path.home() / ".cache" / "talkat" / "long_dictation.pid"
-LISTEN_PID_FILE = Path.home() / ".cache" / "talkat" / "listen.pid"
+logger = get_logger(__name__)
 
 def get_long_pid() -> Optional[int]:
     """Get the PID of the running long dictation process."""
-    if PID_FILE.exists():
-        try:
-            with open(PID_FILE, 'r') as f:
-                pid = int(f.read().strip())
-                # Check if process is still running
-                os.kill(pid, 0)
-                return pid
-        except (ValueError, OSError, ProcessLookupError):
-            # PID file exists but process is not running
-            PID_FILE.unlink(missing_ok=True)
-    return None
+    pm = ProcessManager("long_dictation")
+    is_running, pid = pm.is_running()
+    return pid if is_running else None
 
 def start_long_background() -> int:
     """Start long dictation in background."""
-    if get_long_pid():
-        print("Long dictation is already running.")
-        return 1
+    pm = ProcessManager("long_dictation")
     
-    # Ensure cache directory exists
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Start the process in background
-    proc = subprocess.Popen([sys.executable, "-m", "talkat.cli", "long"],
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL,
-                           stdin=subprocess.DEVNULL,
-                           start_new_session=True)
-    
-    # Write PID to file
-    with open(PID_FILE, 'w') as f:
-        f.write(str(proc.pid))
-    
-    print(f"Long dictation started in background (PID: {proc.pid})")
-    try:
-        subprocess.run(['notify-send', 'Talkat', 'Long dictation started'], check=False)
-    except FileNotFoundError:
-        pass
-    return 0
+    with pm:
+        if get_long_pid():
+            logger.info("Long dictation is already running.")
+            return 1
+        
+        pid = pm.start_background_process(
+            [sys.executable, "-m", "talkat.cli", "long"]
+        )
+        
+        if pid:
+            logger.info(f"Long dictation started in background (PID: {pid})")
+            try:
+                subprocess.run(['notify-send', 'Talkat', 'Long dictation started'], check=False)
+            except FileNotFoundError:
+                pass
+            return 0
+        else:
+            logger.error("Failed to start long dictation")
+            return 1
 
 def stop_long_background() -> int:
     """Stop the background long dictation process."""
-    pid = get_long_pid()
-    if not pid:
-        print("Long dictation is not running.")
-        return 1
+    pm = ProcessManager("long_dictation")
     
-    try:
-        # Send SIGINT (Ctrl+C) to trigger graceful shutdown
-        os.kill(pid, signal.SIGINT)
-        print(f"Stopped long dictation (PID: {pid})")
-        PID_FILE.unlink(missing_ok=True)
-        try:
-            subprocess.run(['notify-send', 'Talkat', 'Long dictation stopped'], check=False)
-        except FileNotFoundError:
-            pass
-        return 0
-    except ProcessLookupError:
-        print("Long dictation process not found.")
-        PID_FILE.unlink(missing_ok=True)
-        return 1
+    with pm:
+        if pm.stop_process():
+            try:
+                subprocess.run(['notify-send', 'Talkat', 'Long dictation stopped'], check=False)
+            except FileNotFoundError:
+                pass
+            return 0
+        else:
+            return 1
 
 def toggle_long_background() -> int:
     """Toggle long dictation - start if stopped, stop if running."""
-    if get_long_pid():
+    pm = ProcessManager("long_dictation")
+    is_running, _ = pm.is_running()
+    
+    if is_running:
         return stop_long_background()
     else:
         return start_long_background()
 
 def get_listen_pid() -> Optional[int]:
     """Get the PID of the running listen process."""
-    if LISTEN_PID_FILE.exists():
-        try:
-            with open(LISTEN_PID_FILE, 'r') as f:
-                pid = int(f.read().strip())
-                # Check if process is still running
-                os.kill(pid, 0)
-                return pid
-        except (ValueError, OSError, ProcessLookupError):
-            # PID file exists but process is not running
-            LISTEN_PID_FILE.unlink(missing_ok=True)
-    return None
+    pm = ProcessManager("listen")
+    is_running, pid = pm.is_running()
+    return pid if is_running else None
 
 def stop_listen_process() -> int:
     """Stop the running listen process."""
-    pid = get_listen_pid()
-    if not pid:
-        print("No active listen process found.")
-        return 1
+    pm = ProcessManager("listen")
     
-    try:
-        # Send SIGINT (Ctrl+C) to trigger graceful shutdown
-        os.kill(pid, signal.SIGINT)
-        print(f"Stopped listen process (PID: {pid})")
-        LISTEN_PID_FILE.unlink(missing_ok=True)
-        try:
-            subprocess.run(['notify-send', 'Talkat', 'Recording stopped, transcribing...'], check=False)
-        except FileNotFoundError:
-            pass
-        return 0
-    except ProcessLookupError:
-        print("Listen process not found.")
-        LISTEN_PID_FILE.unlink(missing_ok=True)
-        return 1
+    with pm:
+        if pm.stop_process():
+            try:
+                subprocess.run(['notify-send', 'Talkat', 'Recording stopped, transcribing...'], check=False)
+            except FileNotFoundError:
+                pass
+            return 0
+        else:
+            logger.info("No active listen process found.")
+            return 1
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Talkat - Voice Command System")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose (DEBUG) logging")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress all but ERROR messages")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # Client mode (listen)
@@ -165,12 +136,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Setup logging based on verbosity flags
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
+
     if args.command == "listen":
         # Check if a listen process is already running
         existing_pid = get_listen_pid()
         if existing_pid:
             # Stop the existing process
-            print(f"Stopping active recording (PID: {existing_pid})...")
+            logger.info(f"Stopping active recording (PID: {existing_pid})...")
             sys.exit(stop_listen_process())
         else:
             # Start a new listen process

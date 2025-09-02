@@ -1,18 +1,35 @@
 [project]
 name = "talkat"
 version = "0.1.0"
-description = "A voice command system with local model server"
+description = "Voice-to-text dictation system for Wayland Linux compositors"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"  # Explicitly support Python 3.12
+requires-python = ">=3.11"  # Support Python 3.11+
+license = {text = "MIT"}
+authors = [
+    {name = "Talkat Contributors"}
+]
+keywords = ["voice", "dictation", "speech-recognition", "whisper", "wayland"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Accessibility"
+]
 dependencies = [
     "faster-whisper>=1.1.1",
-    "numpy>=1.24.0,<2.2",  # Compatible with PyTorch CPU index
+    "numpy>=1.24.0",
     "pyaudio>=0.2.14",
     "vosk>=0.3.45",
     "flask>=2.0",
     "requests>=2.20",
     "transformers>=4.36.0",
-    "torch>=2.0.0",  # Explicitly include torch
+    "torch>=2.0.0",
     "accelerate>=0.24.0",
     "librosa>=0.10.1",
     "soundfile>=0.12.1"
@@ -26,6 +43,12 @@ torch = { index = "pytorch-cpu" }
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/talkat"
+Documentation = "https://github.com/yourusername/talkat/blob/main/README.md"
+Repository = "https://github.com/yourusername/talkat"
+Issues = "https://github.com/yourusername/talkat/issues"
 
 [project.scripts]
 talkat = "talkat.cli:main"

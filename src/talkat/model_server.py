@@ -11,6 +11,9 @@ from faster_whisper import WhisperModel
 import vosk
 
 from talkat.config import load_app_config, CODE_DEFAULTS
+from talkat.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 app = Flask(__name__)
 
@@ -21,7 +24,7 @@ MODEL_REC: Any = None # For Vosk recognizer
 
 def initialize_model():
     global MODEL, MODEL_TYPE, MODEL_REC
-    print("Initializing model for the server...")
+    logger.info("Initializing model for the server...")
 
     config = load_app_config()
     MODEL_TYPE = config.get('model_type', CODE_DEFAULTS['model_type'])
@@ -38,50 +41,50 @@ def initialize_model():
 
     if MODEL_TYPE == "vosk":
         if vosk is None:
-            print("Vosk library is not installed. Cannot load Vosk model.", file=sys.stderr)
+            logger.error("Vosk library is not installed. Cannot load Vosk model.")
             sys.exit(1)
         
         vosk_model_full_path = os.path.join(os.path.expanduser(vosk_model_base_dir), model_name)
         if not os.path.exists(vosk_model_full_path):
-            print(f"Vosk model not found at {vosk_model_full_path}. Server cannot start.", file=sys.stderr)
+            logger.error(f"Vosk model not found at {vosk_model_full_path}. Server cannot start.")
             # Potentially download it here or provide better instructions.
             sys.exit(1)
         
-        print(f"Loading Vosk model: {vosk_model_full_path}...")
+        logger.info(f"Loading Vosk model: {vosk_model_full_path}...")
         MODEL = vosk.Model(vosk_model_full_path)
         # MODEL_REC will be created per request or kept if suitable for concurrent use (Vosk docs needed)
         # For now, let's assume KaldiRecognizer might not be thread-safe or is better created per request.
         # If it can be reused, it should be initialized here.
         # Let's initialize it here assuming it can be reset or used for multiple inferences.
         MODEL_REC = vosk.KaldiRecognizer(MODEL, 16000) # Assuming 16kHz sample rate
-        print("Vosk model loaded.")
+        logger.info("Vosk model loaded.")
 
     elif MODEL_TYPE == "faster-whisper":
         if WhisperModel is None or np is None:
-            print("faster-whisper or numpy is not installed. Cannot load faster-whisper model.", file=sys.stderr)
+            logger.error("faster-whisper or numpy is not installed. Cannot load faster-whisper model.")
             sys.exit(1)
         
-        print(f"Loading faster-whisper model: {model_name}...")
+        logger.info(f"Loading faster-whisper model: {model_name}...")
         model_kwargs: Dict[str, Any] = {
             "device": fw_device,
             "compute_type": fw_compute_type,
             "device_index": fw_device_index
         }
         if model_cache_dir:
-            print(f"Using model cache directory: {model_cache_dir}")
+            logger.info(f"Using model cache directory: {model_cache_dir}")
             model_kwargs["download_root"] = model_cache_dir
         else:
-            print(f"Using default model cache directory for faster-whisper.")
+            logger.info(f"Using default model cache directory for faster-whisper.")
         
         try:
             MODEL = WhisperModel(model_name, **model_kwargs)
-            print(f"Faster-whisper model '{model_name}' loaded.")
+            logger.info(f"Faster-whisper model '{model_name}' loaded.")
         except Exception as e:
-            print(f"Error loading faster-whisper model '{model_name}': {e}", file=sys.stderr)
+            logger.error(f"Error loading faster-whisper model '{model_name}': {e}")
             # Provide more specific advice based on common errors if possible
             sys.exit(1)
     else:
-        print(f"Unsupported model type in config: {MODEL_TYPE}. Server cannot start.", file=sys.stderr)
+        logger.error(f"Unsupported model type in config: {MODEL_TYPE}. Server cannot start.")
         sys.exit(1)
 
 @app.route('/transcribe', methods=['POST'])
@@ -152,7 +155,7 @@ def transcribe_audio():
         return jsonify({"text": text_result})
 
     except Exception as e:
-        print(f"Error during transcription: {e}", file=sys.stderr)
+        logger.error(f"Error during transcription: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -214,7 +217,7 @@ def transcribe_audio_stream():
                     audio_buffer.extend(chunk)
             except (OSError, ValueError) as e:
                 # Client disconnected abruptly
-                print(f"Client disconnected during streaming: {e}", file=sys.stderr)
+                logger.warning(f"Client disconnected during streaming: {e}")
                 return jsonify({"error": "Client disconnected"}), 499
             
             audio_bytes = bytes(audio_buffer)
@@ -236,7 +239,7 @@ def transcribe_audio_stream():
         return jsonify({"text": text_result})
 
     except Exception as e:
-        print(f"Error during streaming transcription: {e}", file=sys.stderr)
+        logger.error(f"Error during streaming transcription: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

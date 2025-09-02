@@ -1,7 +1,6 @@
 """Audio file processing module for transcribing audio files directly."""
 
 import json
-import logging
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
@@ -9,7 +8,9 @@ from typing import Optional, Tuple
 import numpy as np
 import requests
 
-logger = logging.getLogger(__name__)
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def transcribe_audio_file(
@@ -42,28 +43,28 @@ def transcribe_audio_file(
         import librosa
         import soundfile as sf
     except ImportError:
-        print("Error: librosa and soundfile are required for file processing")
-        print("Install them with: pip install librosa soundfile")
+        logger.error("librosa and soundfile are required for file processing")
+        logger.error("Install them with: pip install librosa soundfile")
         sys.exit(1)
     
-    print(f"Loading audio file: {file_path}")
+    logger.info(f"Loading audio file: {file_path}")
     
     try:
         # Load audio file and resample to 16kHz
         audio_data, sample_rate = librosa.load(str(file_path), sr=16000, mono=True)
         duration = len(audio_data) / sample_rate
         
-        print(f"Audio loaded: {duration:.1f} seconds at {sample_rate} Hz")
+        logger.info(f"Audio loaded: {duration:.1f} seconds at {sample_rate} Hz")
         
         # Check if server is running
         try:
             health_response = requests.get(f"{server_url}/health", timeout=2)
             if health_response.status_code != 200:
-                print("Error: Model server is not ready")
+                logger.error("Model server is not ready")
                 sys.exit(1)
         except requests.ConnectionError:
-            print("Error: Model server is not running")
-            print("Start it with: talkat server")
+            logger.error("Model server is not running")
+            logger.error("Start it with: talkat server")
             sys.exit(1)
         
         # Send file to server for transcription
@@ -77,24 +78,24 @@ def transcribe_audio_file(
         
         if response.status_code != 200:
             error_msg = response.json().get('error', 'Unknown error')
-            print(f"Error transcribing file: {error_msg}")
+            logger.error(f"Error transcribing file: {error_msg}")
             sys.exit(1)
         
         result = response.json()
         transcription = result.get('text', '').strip()
         
         if not transcription:
-            print("Warning: No speech detected in the audio file")
+            logger.warning("No speech detected in the audio file")
             return "", duration
         
         return transcription, duration
         
     except librosa.exceptions.NoBackendError:
-        print("Error: No audio backend available")
-        print("Install ffmpeg: sudo apt-get install ffmpeg")
+        logger.error("No audio backend available")
+        logger.error("Install ffmpeg: sudo apt-get install ffmpeg")
         sys.exit(1)
     except Exception as e:
-        print(f"Error processing audio file: {e}")
+        logger.error(f"Error processing audio file: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -173,7 +174,7 @@ def process_audio_file_command(
         transcription, duration = transcribe_audio_file(file_path)
         
         if not transcription:
-            print("No speech detected in the audio file")
+            logger.warning("No speech detected in the audio file")
             return 1
         
         # Format the output
@@ -184,10 +185,10 @@ def process_audio_file_command(
             output_path = Path(output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(formatted_output)
-            print(f"Transcription saved to: {output_path}")
+            logger.info(f"Transcription saved to: {output_path}")
         else:
             # Output to stdout
-            print(formatted_output)
+            print(formatted_output)  # Keep this as print for stdout output
         
         # Copy to clipboard if requested
         if clipboard:
@@ -201,7 +202,7 @@ def process_audio_file_command(
                         check=True,
                         capture_output=True
                     )
-                    print("Transcription copied to clipboard")
+                    logger.info("Transcription copied to clipboard")
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     # Fallback to xclip (X11)
                     try:
@@ -211,22 +212,22 @@ def process_audio_file_command(
                             check=True,
                             capture_output=True
                         )
-                        print("Transcription copied to clipboard")
+                        logger.info("Transcription copied to clipboard")
                     except (subprocess.CalledProcessError, FileNotFoundError):
-                        print("Warning: Could not copy to clipboard (wl-copy or xclip not found)")
+                        logger.warning("Could not copy to clipboard (wl-copy or xclip not found)")
             except Exception as e:
-                print(f"Warning: Could not copy to clipboard: {e}")
+                logger.warning(f"Could not copy to clipboard: {e}")
         
         # Show summary
-        print(f"\nSummary:")
-        print(f"  Duration: {duration:.1f} seconds")
-        print(f"  Words: {len(transcription.split())}")
-        print(f"  Characters: {len(transcription)}")
+        logger.info(f"\nSummary:")
+        logger.info(f"  Duration: {duration:.1f} seconds")
+        logger.info(f"  Words: {len(transcription.split())}")
+        logger.info(f"  Characters: {len(transcription)}")
         
         return 0
         
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")
         return 1
 
 
@@ -255,8 +256,8 @@ def batch_process_files(
     
     for file_path in file_paths:
         file_path = Path(file_path)
-        print(f"\nProcessing: {file_path.name}")
-        print("-" * 40)
+        logger.info(f"\nProcessing: {file_path.name}")
+        logger.info("-" * 40)
         
         try:
             transcription, duration = transcribe_audio_file(str(file_path))
@@ -277,22 +278,22 @@ def batch_process_files(
                     
                     output_file = output_dir / f"{file_path.stem}{ext}"
                     output_file.write_text(formatted_output)
-                    print(f"Saved to: {output_file}")
+                    logger.info(f"Saved to: {output_file}")
                 else:
-                    print(formatted_output)
+                    print(formatted_output)  # Keep this as print for stdout output
                 
                 success_count += 1
             else:
-                print("No speech detected")
+                logger.warning("No speech detected")
                 error_count += 1
                 
         except Exception as e:
-            print(f"Error: {e}")
+            logger.error(f"Error: {e}")
             error_count += 1
     
-    print(f"\n{'=' * 40}")
-    print(f"Batch processing complete:")
-    print(f"  Success: {success_count}")
-    print(f"  Errors: {error_count}")
+    logger.info(f"\n{'=' * 40}")
+    logger.info(f"Batch processing complete:")
+    logger.info(f"  Success: {success_count}")
+    logger.info(f"  Errors: {error_count}")
     
     return 0 if error_count == 0 else 1

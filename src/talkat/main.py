@@ -18,6 +18,10 @@ import base64   # Added for encoding audio data
 
 from .record import record_audio_with_vad, calibrate_microphone, stream_audio_with_vad
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
+from .logging_config import get_logger
+from .process_manager import ProcessManager, setup_signal_handlers
+
+logger = get_logger(__name__)
 
 def get_transcript_dir() -> Path:
     """Get or create the transcript directory."""
@@ -106,8 +110,8 @@ def postprocess_transcript(transcript_path: Path, processor_command: Optional[st
 def ensure_model_exists(model_path: str) -> bool:
     """Checks if the Vosk model exists and prints messages if not."""
     if not os.path.exists(model_path):
-        print(f"Model not found at {model_path}")
-        print("Please run the setup script to download the model.")
+        logger.error(f"Model not found at {model_path}")
+        logger.error("Please run the setup script to download the model.")
         try:
             subprocess.run(['notify-send', 'Talkat', 'Model not found'], check=False)
         except FileNotFoundError:
@@ -117,7 +121,7 @@ def ensure_model_exists(model_path: str) -> bool:
 
 def run_calibration_command(current_config: Dict[str, Any]):
     """Runs microphone calibration and saves the threshold to the config file."""
-    print("Starting microphone calibration...")
+    logger.info("Starting microphone calibration...")
     threshold = calibrate_microphone()
     
     config_to_save = current_config.copy() # Start with current config (could be from CLI overrides)
@@ -125,7 +129,7 @@ def run_calibration_command(current_config: Dict[str, Any]):
     config_to_save['silence_threshold'] = threshold 
     
     save_app_config(config_to_save)
-    print(f"Calibration complete. Threshold set to: {threshold:.1f}")
+    logger.info(f"Calibration complete. Threshold set to: {threshold:.1f}")
     try:
         subprocess.run(['notify-send', 'Talkat', f'Calibration complete. Threshold: {threshold:.1f}'], check=False)
     except FileNotFoundError:
@@ -144,34 +148,23 @@ def run_listen_command(
 ) -> int:
     """Runs the main speech-to-text process by sending audio to a model server."""
     
-    # Set up PID file for toggle functionality
+    # Set up process management for toggle functionality
     from pathlib import Path
     import signal
     import threading
-    LISTEN_PID_FILE = Path.home() / ".cache" / "talkat" / "listen.pid"
     
-    # Ensure cache directory exists
-    LISTEN_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Write our PID to file to enable toggle functionality
-    with open(LISTEN_PID_FILE, 'w') as f:
-        f.write(str(os.getpid()))
+    pm = ProcessManager("listen")
+    pm.write_pid(os.getpid())
     
     def cleanup_pid():
-        try:
-            if LISTEN_PID_FILE.exists():
-                pid_text = LISTEN_PID_FILE.read_text().strip()
-                if pid_text and os.getpid() == int(pid_text):
-                    LISTEN_PID_FILE.unlink(missing_ok=True)
-        except (ValueError, OSError):
-            pass
+        pm.cleanup_pid_file()
     
     # Flag to signal recording should stop
     stop_recording = threading.Event()
     
     # Set up signal handler for graceful shutdown when toggled off
     def signal_handler(signum, frame):
-        print("\nRecording stopped by toggle command. Finishing transcription...")
+        logger.info("\nRecording stopped by toggle command. Finishing transcription...")
         stop_recording.set()
         cleanup_pid()
         # The audio stream will stop naturally when it checks the flag
@@ -191,12 +184,12 @@ def run_listen_command(
         # This is mostly for informative message. The actual value is already correctly prioritised.
         loaded_file_conf_val = load_app_config().get('silence_threshold')
         if loaded_file_conf_val != CODE_DEFAULTS['silence_threshold']:
-             print(f"Using calibrated threshold from config: {current_threshold:.1f}")
+             logger.info(f"Using calibrated threshold from config: {current_threshold:.1f}")
         else:
-            print(f"No calibrated threshold found in config or CLI. Using default: {current_threshold:.1f}")
-            print(f"Run 'talkat calibrate' to set a custom threshold.")
+            logger.info(f"No calibrated threshold found in config or CLI. Using default: {current_threshold:.1f}")
+            logger.info(f"Run 'talkat calibrate' to set a custom threshold.")
     else:
-         print(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
+         logger.info(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
     
     try:
         # --- Streaming Implementation --- 
@@ -214,25 +207,25 @@ def run_listen_command(
         try:
             sample_rate = next(audio_stream_generator_func)
             if not isinstance(sample_rate, int):
-                print("Error: record_audio_with_vad did not yield sample rate correctly.")
+                logger.error("record_audio_with_vad did not yield sample rate correctly.")
                 # Fallback or error out if rate is not an int (e.g. None if no speech first chunk)
                 # This also handles if the generator is empty (no speech detected from the start)
-                print("No speech detected or audio input error.")
+                logger.warning("No speech detected or audio input error.")
                 try:
                     subprocess.run(['notify-send', 'Talkat', 'No speech detected'], check=False)
                 except FileNotFoundError:
                     pass
                 return 0 # Exit if no rate / no audio
         except StopIteration: # Generator was empty
-            print("No speech detected (empty audio stream).")
+            logger.warning("No speech detected (empty audio stream).")
             try:
                 subprocess.run(['notify-send', 'Talkat', 'No speech detected'], check=False)
             except FileNotFoundError:
                 pass
             return 0
 
-        print(f"Speech detected. Streaming audio at {sample_rate} Hz to model server...")
-        print("(Run 'talkat listen' again to stop recording)")
+        logger.info(f"Speech detected. Streaming audio at {sample_rate} Hz to model server...")
+        logger.info("(Run 'talkat listen' again to stop recording)")
         try:
             subprocess.run(['notify-send', 'Talkat', 'Recording... Run "talkat listen" again to stop'], check=False)
         except FileNotFoundError:
@@ -245,7 +238,7 @@ def run_listen_command(
             # Then, stream audio chunks from the modified record_audio_with_vad
             for audio_chunk in audio_stream_generator_func:
                 if stop_recording.is_set():
-                    print("Stopping audio stream due to toggle command...")
+                    logger.info("Stopping audio stream due to toggle command...")
                     break
                 if audio_chunk: # Ensure not None or empty bytes if VAD yields such
                     yield audio_chunk
@@ -260,56 +253,56 @@ def run_listen_command(
             text = response_json.get('text', '').strip()
             
         except requests.exceptions.ConnectionError:
-            print(f"Error: Could not connect to the model server at {server_url}.")
-            print("Please ensure the model server is running: python -m src.talkat.model_server")
+            logger.error(f"Could not connect to the model server at {server_url}.")
+            logger.error("Please ensure the model server is running: python -m src.talkat.model_server")
             try:
                 subprocess.run(['notify-send', 'Talkat', 'Error: Model server not reachable.'], check=False)
             except FileNotFoundError:
                 pass
             return 1
         except requests.exceptions.Timeout:
-            print(f"Error: Request to model server timed out.")
+            logger.error("Request to model server timed out.")
             try:
                 subprocess.run(['notify-send', 'Talkat', 'Error: Model server timeout.'], check=False)
             except FileNotFoundError:
                 pass
             return 1
         except requests.exceptions.RequestException as e:
-            print(f"Error communicating with model server: {e}")
+            logger.error(f"Error communicating with model server: {e}")
             try:
                 subprocess.run(['notify-send', 'Talkat', f'Server communication error: {e}'], check=False)
             except FileNotFoundError:
                 pass
             return 1
         except json.JSONDecodeError:
-            print(f"Error: Could not decode JSON response from server: {response.text}")
+            logger.error(f"Could not decode JSON response from server: {response.text}")
             return 1
 
         if text:
-            print(f"Recognized: {text}")
+            logger.info(f"Recognized: {text}")
             
             # Save transcript for short mode if enabled
             config = load_app_config()
             if config.get('save_transcripts', True):
                 transcript_path = save_transcript(text, mode="short")
-                print(f"Transcript saved to: {transcript_path}")
+                logger.info(f"Transcript saved to: {transcript_path}")
             
             try:
                 subprocess.run(['ydotool', 'type', '--key-delay=1', text], check=True)
-                print(f"Typed: {text}")
+                logger.info(f"Typed: {text}")
                 try:
                     subprocess.run(['notify-send', 'Talkat', f'Typed: {text}'], check=False)
                 except FileNotFoundError:
                     pass
             except (subprocess.CalledProcessError, FileNotFoundError):
-                print("ydotool not available, printing text instead:")
+                logger.warning("ydotool not available, printing text instead:")
                 print(f"TEXT: {text}")
                 try:
                     subprocess.run(['notify-send', 'Talkat', f'Recognized: {text}'], check=False)
                 except FileNotFoundError:
                     pass
         else:
-            print("No text recognized in the audio")
+            logger.warning("No text recognized in the audio")
             try:
                 subprocess.run(['notify-send', 'Talkat', 'No text recognized'], check=False)
             except FileNotFoundError:
@@ -319,11 +312,11 @@ def run_listen_command(
         return 0
             
     except KeyboardInterrupt:
-        print("\nRecording interrupted.")
+        logger.info("\nRecording interrupted.")
         cleanup_pid()
         return 0
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
         try:
@@ -345,30 +338,27 @@ def run_long_dictation_command(
     clipboard: bool = True
 ):
     """Runs long dictation mode with continuous speech recognition."""
-    # Clean up PID file on exit
-    from pathlib import Path
-    PID_FILE = Path.home() / ".cache" / "talkat" / "long_dictation.pid"
+    # Set up process management for long dictation
+    pm = ProcessManager("long_dictation") 
+    pm.write_pid(os.getpid())
     
     def cleanup_pid():
-        try:
-            if PID_FILE.exists():
-                pid_text = PID_FILE.read_text().strip()
-                if pid_text and os.getpid() == int(pid_text):
-                    PID_FILE.unlink(missing_ok=True)
-        except (ValueError, OSError):
-            pass
+        pm.cleanup_pid_file()
+    
+    # Set up proper signal handling
+    setup_signal_handlers(cleanup_func=cleanup_pid)
     
     # Use the passed silence_threshold
     current_threshold = silence_threshold
     if current_threshold == CODE_DEFAULTS['silence_threshold']:
         loaded_file_conf_val = load_app_config().get('silence_threshold')
         if loaded_file_conf_val != CODE_DEFAULTS['silence_threshold']:
-             print(f"Using calibrated threshold from config: {current_threshold:.1f}")
+             logger.info(f"Using calibrated threshold from config: {current_threshold:.1f}")
         else:
-            print(f"No calibrated threshold found in config or CLI. Using default: {current_threshold:.1f}")
-            print(f"Run 'talkat calibrate' to set a custom threshold.")
+            logger.info(f"No calibrated threshold found in config or CLI. Using default: {current_threshold:.1f}")
+            logger.info(f"Run 'talkat calibrate' to set a custom threshold.")
     else:
-         print(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
+         logger.info(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
     
     # Create a single transcript file for this session
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -376,15 +366,15 @@ def run_long_dictation_command(
     transcript_dir = get_transcript_dir()
     transcript_path = transcript_dir / transcript_filename
     
-    print(f"Starting long dictation mode. Press Ctrl+C to stop.")
-    print(f"Transcript directory: {transcript_dir}")
-    print(f"Transcript will be saved to: {transcript_path}")
+    logger.info(f"Starting long dictation mode. Press Ctrl+C to stop.")
+    logger.info(f"Transcript directory: {transcript_dir}")
+    logger.info(f"Transcript will be saved to: {transcript_path}")
     
     # Create empty file to ensure it exists
     transcript_path.touch()
     
     if clipboard:
-        print("Transcript will be copied to clipboard when finished.")
+        logger.info("Transcript will be copied to clipboard when finished.")
     
     try:
         subprocess.run(['notify-send', 'Talkat', 'Long dictation mode started. Press Ctrl+C to stop.'], check=False)
@@ -407,7 +397,7 @@ def run_long_dictation_command(
             try:
                 sample_rate = next(audio_stream_generator_func)
                 if not isinstance(sample_rate, int):
-                    print("Error: stream_audio_with_vad did not yield sample rate correctly.")
+                    logger.error("stream_audio_with_vad did not yield sample rate correctly.")
                     continue  # Try again for next utterance
             except StopIteration:
                 # No speech detected in this cycle, wait a bit and try again
@@ -433,7 +423,7 @@ def run_long_dictation_command(
                 text = response_json.get('text', '').strip()
                 
                 if text:
-                    print(f"Recognized: {text}")
+                    logger.info(f"Recognized: {text}")
                     full_transcript.append(text)
                     
                     # Save to file immediately
@@ -441,25 +431,25 @@ def run_long_dictation_command(
                         f.write(text + ' ')
                     
                     # Don't type in long dictation mode
-                    print("(Saved to transcript)")
+                    logger.debug("(Saved to transcript)")
                 
             except requests.exceptions.ConnectionError:
-                print(f"Error: Could not connect to the model server at {server_url}.")
-                print("Please ensure the model server is running: talkat server")
+                logger.error(f"Could not connect to the model server at {server_url}.")
+                logger.error("Please ensure the model server is running: talkat server")
                 try:
                     subprocess.run(['notify-send', 'Talkat', 'Error: Model server not reachable.'], check=False)
                 except FileNotFoundError:
                     pass
                 return 1
             except requests.exceptions.RequestException as e:
-                print(f"Error communicating with model server: {e}")
+                logger.error(f"Error communicating with model server: {e}")
                 continue  # Try next utterance
             except json.JSONDecodeError:
-                print(f"Error: Could not decode JSON response from server")
+                logger.error("Could not decode JSON response from server")
                 continue  # Try next utterance
                 
     except KeyboardInterrupt:
-        print("\nLong dictation mode stopped.")
+        logger.info("\nLong dictation mode stopped.")
         
         # Close the session cleanly
         session.close()
@@ -469,16 +459,16 @@ def run_long_dictation_command(
         
         if full_text and clipboard:
             if copy_to_clipboard(full_text):
-                print("Transcript copied to clipboard!")
+                logger.info("Transcript copied to clipboard!")
                 try:
                     subprocess.run(['notify-send', 'Talkat', 'Transcript copied to clipboard'], check=False)
                 except FileNotFoundError:
                     pass
             else:
-                print("Could not copy to clipboard (wl-copy or xclip not available)")
+                logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
         
-        print(f"Full transcript saved to: {transcript_path}")
-        print(f"Total words: {len(full_text.split())}")
+        logger.info(f"Full transcript saved to: {transcript_path}")
+        logger.info(f"Total words: {len(full_text.split())}")
         
         try:
             subprocess.run(['notify-send', 'Talkat', f'Long dictation stopped. Saved to {transcript_filename}'], check=False)
@@ -488,7 +478,7 @@ def run_long_dictation_command(
         cleanup_pid()
         return 0
     except Exception as e:
-        print(f"Error in long dictation mode: {e}")
+        logger.error(f"Error in long dictation mode: {e}")
         import traceback
         traceback.print_exc()
         session.close()

@@ -1,20 +1,24 @@
 [Unit]
 Description=Talkat Voice Dictation Server
 Documentation=https://github.com/yourusername/talkat
-After=network.target sound.target
+After=pulseaudio.service pipewire.service
+Wants=pulseaudio.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/talkat server
+ExecStart=%i/bin/talkat server
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+Environment=HOME=%h
+Environment=XDG_CONFIG_HOME=%h/.config
+Environment=XDG_CACHE_HOME=%h/.cache
+Environment=XDG_DATA_HOME=%h/.local/share
 
-# Security hardening
+# Security hardening for user service
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=read-only
 ReadWritePaths=%h/.cache/talkat %h/.local/share/talkat %h/.config/talkat
 NoNewPrivileges=yes
 ProtectKernelTunables=yes
@@ -23,7 +27,6 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 PrivateDevices=no  # Need access to audio devices

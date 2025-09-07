@@ -282,7 +282,7 @@ sudo tc qdisc del dev lo root
 ### Test 18: Fresh System-wide Installation
 ```bash
 # Remove existing installation
-sudo rm -rf /opt/talkat
+sudo rm -rf /usr/share/talkat
 sudo rm /usr/local/bin/talkat
 sudo rm /etc/systemd/system/talkat.service
 

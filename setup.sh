@@ -31,7 +31,7 @@ if [ "$INSTALL_MODE" = "system" ]; then
         echo "System-wide installation requires root. Please run with sudo."
         exit 1
     fi
-    APP_DIR="/opt/talkat"
+    APP_DIR="/usr/share/talkat"
     BIN_DIR="/usr/local/bin"
     SERVICE_DIR="/etc/systemd/system"
     SERVICE_TYPE="system"
@@ -187,11 +187,11 @@ echo "Transcripts are saved to: ~/.local/share/talkat/transcripts/"
 # Clean up old installations if requested
 if [ "$INSTALL_MODE" = "user" ] && [ -f "/usr/local/bin/talkat" ]; then
     echo ""
-    echo "Note: System-wide installation detected at /opt/talkat"
+    echo "Note: System-wide installation detected at /usr/share/talkat"
     echo "To remove it, run:"
     echo "  sudo systemctl stop talkat"
     echo "  sudo systemctl disable talkat"
-    echo "  sudo rm -rf /opt/talkat"
+    echo "  sudo rm -rf /usr/share/talkat"
     echo "  sudo rm /usr/local/bin/talkat"
     echo "  sudo rm /etc/systemd/system/talkat.service"
 fi

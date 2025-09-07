@@ -264,7 +264,11 @@ def health_check():
 
 def main():
     initialize_model()
-    app.run(host="127.0.0.1", port=5555)
+    config = load_app_config()
+    host = config.get("server_host", CODE_DEFAULTS["server_host"])
+    port = config.get("server_port", CODE_DEFAULTS["server_port"])
+    logger.info(f"Starting Talkat model server on {host}:{port}")
+    app.run(host=host, port=port)
 
 
 if __name__ == "__main__":

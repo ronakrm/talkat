@@ -220,7 +220,7 @@ def run_listen_command(
         # Stops when speech ends.
         audio_stream_generator_func = stream_audio_with_vad(
             silence_threshold=current_threshold,
-            silence_duration=3.0,  # 3 seconds of silence before stopping
+            silence_duration=config.get("silence_duration", CODE_DEFAULTS["silence_duration"]),
             debug=True,
         )
 
@@ -263,10 +263,14 @@ def run_listen_command(
                 if audio_chunk:  # Ensure not None or empty bytes if VAD yields such
                     yield audio_chunk
 
-        server_url = "http://127.0.0.1:5555/transcribe_stream"  # New streaming endpoint
+        server_url = f"{config.get('server_url', CODE_DEFAULTS['server_url'])}/transcribe_stream"
         try:
             # Increased timeout for potentially long streaming and server processing
-            response = requests.post(server_url, data=request_data_generator(), timeout=120)
+            response = requests.post(
+                server_url, 
+                data=request_data_generator(), 
+                timeout=config.get("http_timeout", CODE_DEFAULTS["http_timeout"])
+            )
             response.raise_for_status()
 
             response_json = response.json()
@@ -415,7 +419,7 @@ def run_long_dictation_command(
             audio_stream_generator_func = stream_audio_with_vad(
                 silence_threshold=0,  # No silence threshold for long mode
                 debug=False,  # Less verbose for continuous mode
-                max_duration=600.0,  # 10 minute timeout for long mode
+                max_duration=config.get("long_mode_max_duration", CODE_DEFAULTS["long_mode_max_duration"]),
             )
 
             # Get the sample rate first
@@ -426,7 +430,7 @@ def run_long_dictation_command(
                     continue  # Try again for next utterance
             except StopIteration:
                 # No speech detected in this cycle, wait a bit and try again
-                time.sleep(0.1)
+                time.sleep(config.get("process_check_interval", CODE_DEFAULTS["process_check_interval"]))
                 continue
 
             # Collect audio data for this utterance
@@ -439,12 +443,12 @@ def run_long_dictation_command(
                     if audio_chunk:
                         yield audio_chunk
 
-            server_url = "http://127.0.0.1:5555/transcribe_stream"
+            server_url = f"{config.get('server_url', CODE_DEFAULTS['server_url'])}/transcribe_stream"
             try:
                 response = session.post(
                     server_url,
                     data=request_data_generator(sample_rate, audio_stream_generator_func),
-                    timeout=120,
+                    timeout=config.get("http_timeout", CODE_DEFAULTS["http_timeout"]),
                 )
                 response.raise_for_status()
 

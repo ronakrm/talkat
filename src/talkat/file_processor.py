@@ -13,19 +13,27 @@ logger = get_logger(__name__)
 
 
 def transcribe_audio_file(
-    file_path: str, server_url: str = "http://127.0.0.1:5555", output_format: str = "text"
+    file_path: str, server_url: str | None = None, output_format: str = "text"
 ) -> tuple[str, float]:
     """
     Transcribe an audio file using the model server.
 
     Args:
         file_path: Path to the audio file
-        server_url: URL of the model server
+        server_url: URL of the model server (uses config default if None)
         output_format: Output format (text, json, srt, vtt)
 
     Returns:
         Tuple of (transcription, duration in seconds)
     """
+    # Load configuration
+    from .config import CODE_DEFAULTS, load_app_config
+    config = load_app_config()
+    
+    # Use configured server URL if not provided
+    if server_url is None:
+        server_url = config.get("server_url", CODE_DEFAULTS["server_url"])
+    
     # Validate and sanitize file path
     try:
         file_path_obj = validate_file_path(file_path, must_exist=True)
@@ -56,7 +64,10 @@ def transcribe_audio_file(
 
         # Check if server is running
         try:
-            health_response = requests.get(f"{server_url}/health", timeout=2)
+            health_response = requests.get(
+                f"{server_url}/health", 
+                timeout=config.get("health_check_timeout", CODE_DEFAULTS["health_check_timeout"])
+            )
             if health_response.status_code != 200:
                 logger.error("Model server is not ready")
                 sys.exit(1)
@@ -71,7 +82,10 @@ def transcribe_audio_file(
             response = requests.post(
                 f"{server_url}/transcribe_file",
                 files=files,
-                timeout=max(30, duration * 2),  # Dynamic timeout based on duration
+                timeout=max(
+                    config.get("file_processing_timeout_base", CODE_DEFAULTS["file_processing_timeout_base"]), 
+                    duration * 2
+                ),  # Dynamic timeout based on duration
             )
 
         if response.status_code != 200:

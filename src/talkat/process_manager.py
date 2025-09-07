@@ -28,28 +28,39 @@ class ProcessManager:
         self.lock_file = LOCK_DIR / f"{process_name}.lock"
         self._lock_fd: int | None = None
 
-    def acquire_lock(self, timeout: float = 1.0) -> bool:
+    def acquire_lock(self, timeout: float | None = None) -> bool:
         """
         Acquire an exclusive lock for this process.
 
         Args:
-            timeout: Maximum time to wait for lock
+            timeout: Maximum time to wait for lock (uses config default if None)
 
         Returns:
             True if lock acquired, False otherwise
         """
+        if timeout is None:
+            from .config import CODE_DEFAULTS, load_app_config
+            config = load_app_config()
+            timeout = config.get("lock_acquire_timeout", CODE_DEFAULTS["lock_acquire_timeout"])
+            
         try:
             self._lock_fd = os.open(str(self.lock_file), os.O_CREAT | os.O_WRONLY)
 
             # Try to acquire lock with timeout
             start_time = time.time()
+            retry_interval = None
+            
             while time.time() - start_time < timeout:
                 try:
                     fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     logger.debug(f"Acquired lock for {self.process_name}")
                     return True
                 except OSError:
-                    time.sleep(0.01)
+                    if retry_interval is None:
+                        from .config import CODE_DEFAULTS, load_app_config
+                        config = load_app_config()
+                        retry_interval = config.get("lock_retry_interval", CODE_DEFAULTS["lock_retry_interval"])
+                    time.sleep(retry_interval)
 
             logger.warning(f"Failed to acquire lock for {self.process_name} within {timeout}s")
             return False
@@ -139,16 +150,21 @@ class ProcessManager:
             except Exception as e:
                 logger.error(f"Error removing PID file: {e}")
 
-    def stop_process(self, timeout: float = 5.0) -> bool:
+    def stop_process(self, timeout: float | None = None) -> bool:
         """
         Stop a running process gracefully.
 
         Args:
-            timeout: Maximum time to wait for process to stop
+            timeout: Maximum time to wait for process to stop (uses config default if None)
 
         Returns:
             True if process stopped, False otherwise
         """
+        if timeout is None:
+            from .config import CODE_DEFAULTS, load_app_config
+            config = load_app_config()
+            timeout = config.get("process_stop_timeout", CODE_DEFAULTS["process_stop_timeout"])
+        
         is_running, pid = self.is_running()
         if not is_running or pid is None:
             logger.info(f"No {self.process_name} process to stop")
@@ -159,12 +175,17 @@ class ProcessManager:
             logger.info(f"Sending SIGINT to {self.process_name} process (PID: {pid})")
             os.kill(pid, signal.SIGINT)
 
+            # Load check interval from config
+            from .config import CODE_DEFAULTS, load_app_config
+            config = load_app_config()
+            check_interval = config.get("process_check_interval", CODE_DEFAULTS["process_check_interval"])
+
             # Wait for process to terminate
             start_time = time.time()
             while time.time() - start_time < timeout:
                 try:
                     os.kill(pid, 0)  # Check if still running
-                    time.sleep(0.1)
+                    time.sleep(check_interval)
                 except ProcessLookupError:
                     # Process terminated
                     logger.info(f"Process {pid} stopped gracefully")
@@ -182,7 +203,8 @@ class ProcessManager:
                 # Still running, force kill
                 logger.error(f"Process {pid} won't stop, sending SIGKILL")
                 os.kill(pid, signal.SIGKILL)
-                time.sleep(0.5)
+                background_delay = config.get("background_process_delay", CODE_DEFAULTS["background_process_delay"])
+                time.sleep(background_delay)
             except ProcessLookupError:
                 pass
 

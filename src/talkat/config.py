@@ -19,7 +19,36 @@ ensure_user_directories()
 
 # 1. CODE DEFAULTS
 CODE_DEFAULTS: dict[str, Any] = {
+    # Audio and Recognition Settings
     "silence_threshold": 200.0,
+    "silence_duration": 3.0,  # Seconds of silence before stopping recording
+    "pre_speech_padding": 0.3,  # Seconds of audio to keep before speech starts
+    "silence_threshold_fallback": 500.0,  # Fallback threshold when auto-detection fails
+    "silence_threshold_min": 50.0,  # Minimum allowed silence threshold
+    "silence_threshold_max": 5000.0,  # Maximum allowed silence threshold
+    
+    # Recording Timeouts and Durations
+    "max_recording_duration": 30.0,  # Max duration for short recordings (seconds)
+    "long_mode_max_duration": 600.0,  # Max duration for long mode (10 minutes)
+    
+    # Server Configuration
+    "server_host": "127.0.0.1",  # Server bind address
+    "server_port": 5555,  # Server port
+    "server_url": "http://127.0.0.1:5555",  # Complete server URL for clients
+    
+    # Network Timeouts
+    "http_timeout": 120,  # General HTTP request timeout (seconds)
+    "health_check_timeout": 2,  # Health check timeout (seconds)
+    "file_processing_timeout_base": 30,  # Base timeout for file processing (seconds)
+    
+    # Process Management Timeouts
+    "process_stop_timeout": 5.0,  # Max time to wait for process to stop
+    "lock_acquire_timeout": 1.0,  # Max time to wait for lock acquisition
+    "lock_retry_interval": 0.01,  # Sleep interval between lock acquisition attempts
+    "process_check_interval": 0.1,  # Sleep interval when checking process status
+    "background_process_delay": 0.5,  # Delay when stopping background processes
+    
+    # Model Configuration
     "model_type": "faster-whisper",  # Options: faster-whisper, distil-whisper, vosk
     "model_name": "base.en",
     "faster_whisper_model_cache_dir": str(FASTER_WHISPER_CACHE_DIR),
@@ -27,13 +56,14 @@ CODE_DEFAULTS: dict[str, Any] = {
     "fw_compute_type": "int8",
     "fw_device_index": 0,
     "vosk_model_base_dir": str(VOSK_CACHE_DIR),
-    "clipboard_on_long": True,
-    "save_transcripts": True,
-    "transcript_dir": str(TRANSCRIPT_DIR),
-    # New model-related options
     "distil_model_name": "distil-whisper/distil-medium.en",  # Medium model better for CPU
     "model_cache_dir": str(FASTER_WHISPER_CACHE_DIR.parent),
     "device": "cpu",  # cpu, cuda, auto - defaulting to CPU for compatibility
+    
+    # Application Features
+    "clipboard_on_long": True,
+    "save_transcripts": True,
+    "transcript_dir": str(TRANSCRIPT_DIR),
 }
 
 

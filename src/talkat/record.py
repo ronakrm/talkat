@@ -64,7 +64,10 @@ def calibrate_microphone(duration: int = 10) -> float:
     mic_index: int | None = find_microphone()
     if mic_index is None:
         logger.warning("No microphone found during calibration, using default threshold.")
-        return 500.0  # Default fallback as float
+        # Load configuration for fallback threshold
+        from .config import CODE_DEFAULTS, load_app_config
+        config = load_app_config()
+        return config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
 
     p = pyaudio.PyAudio()
 
@@ -80,7 +83,10 @@ def calibrate_microphone(duration: int = 10) -> float:
     except Exception as e:
         logger.error(f"Error opening audio stream for calibration: {e}")
         p.terminate()
-        return 500.0
+        # Load configuration for fallback threshold
+        from .config import CODE_DEFAULTS, load_app_config
+        config = load_app_config()
+        return config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
 
     volumes: list[float] = []
     chunks_to_read: int = int(duration * RATE / CHUNK)
@@ -110,7 +116,10 @@ def calibrate_microphone(duration: int = 10) -> float:
         logger.info("")  # New line after progress bar
 
     if not volumes:
-        return 500.0
+        # Load configuration for fallback threshold
+        from .config import CODE_DEFAULTS, load_app_config
+        config = load_app_config()
+        return config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
 
     # Calculate statistics using percentiles for better noise floor estimation
     volumes_array = np.array(volumes)
@@ -130,8 +139,16 @@ def calibrate_microphone(duration: int = 10) -> float:
     # This provides a good balance between sensitivity and noise rejection
     threshold: float = p95
 
-    # But ensure it's at least some minimum value
-    threshold = max(threshold, 50.0)
+    # Load configuration for threshold limits
+    from .config import CODE_DEFAULTS, load_app_config
+    config = load_app_config()
+    
+    threshold_min = config.get("silence_threshold_min", CODE_DEFAULTS["silence_threshold_min"])
+    threshold_max = config.get("silence_threshold_max", CODE_DEFAULTS["silence_threshold_max"])
+    
+    # Ensure threshold is within configured bounds
+    threshold = max(threshold, threshold_min)
+    threshold = min(threshold, threshold_max)
 
     logger.info("\n" + "-" * 60)
     logger.info("CALIBRATION RESULTS:")
@@ -162,24 +179,31 @@ def calibrate_microphone(duration: int = 10) -> float:
 
 
 def record_audio_with_vad(
-    silence_threshold: float | None = None, silence_duration: float = 3.0, debug: bool = True
+    silence_threshold: float | None = None, silence_duration: float | None = None, debug: bool = True
 ) -> tuple[bytes, int] | None:
     """Record with improved VAD: pre-speech padding, defined speech segments, and clear stopping."""
+    # Load configuration
+    from .config import CODE_DEFAULTS, load_app_config
+    config = load_app_config()
+    
     CHUNK = 1024
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     RATE = 16000
 
-    # VAD Configuration
-    PRE_SPEECH_PADDING_DURATION: float = 0.3  # Seconds of audio to keep before speech starts
-    MAX_RECORDING_DURATION_SECONDS: int = 30  # Overall timeout for listening
+    # VAD Configuration from config
+    PRE_SPEECH_PADDING_DURATION: float = config.get("pre_speech_padding", CODE_DEFAULTS["pre_speech_padding"])
+    MAX_RECORDING_DURATION_SECONDS: float = config.get("max_recording_duration", CODE_DEFAULTS["max_recording_duration"])
 
     if silence_threshold is None:
         # This path should ideally not be hit if main.py provides a threshold.
         logger.warning(
             "silence_threshold not provided to record_audio_with_vad. Using a default fallback."
         )
-        silence_threshold = 500.0
+        silence_threshold = config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        
+    if silence_duration is None:
+        silence_duration = config.get("silence_duration", CODE_DEFAULTS["silence_duration"])
 
     mic_index: int | None = find_microphone()
     if mic_index is None:
@@ -363,8 +387,17 @@ def stream_audio_with_vad(
     # Calculate chunk samples based on ms, ensure it's an integer for PyAudio
     CHUNK_SAMPLES: int = int(RATE * chunk_size_ms / 1000)
 
-    # VAD Configuration
-    PRE_SPEECH_PADDING_DURATION: float = 0.3  # Seconds of audio to keep before speech starts
+    # Load configuration
+    from .config import CODE_DEFAULTS, load_app_config
+    config = load_app_config()
+
+    # VAD Configuration from config
+    PRE_SPEECH_PADDING_DURATION: float = config.get("pre_speech_padding", CODE_DEFAULTS["pre_speech_padding"])
+    
+    # Use configured max duration if not provided
+    if max_duration is None:
+        max_duration = config.get("max_recording_duration", CODE_DEFAULTS["max_recording_duration"])
+    
     MAX_RECORDING_DURATION_SECONDS: float = (
         max_duration if max_duration is not None else float("inf")
     )
@@ -373,7 +406,7 @@ def stream_audio_with_vad(
         logger.warning(
             "silence_threshold not provided to stream_audio_with_vad. Using a default fallback."
         )
-        silence_threshold = 500.0
+        silence_threshold = config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
 
     # If silence_threshold is 0, disable VAD and stream continuously
     no_vad_mode: bool = silence_threshold == 0

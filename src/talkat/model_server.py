@@ -106,7 +106,7 @@ def transcribe_audio():
         int(data["rate"])  # Client should send the correct rate
 
         # For debugging:
-        # print(f"Received {len(audio_bytes)} bytes of audio data, rate {rate} Hz.")
+        logger.debug(f"Received {len(audio_bytes)} bytes of audio data, rate {data['rate']} Hz.")
 
         text_result = ""
 
@@ -147,7 +147,7 @@ def transcribe_audio():
             else:
                 audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                 segments, info = MODEL.transcribe(audio_np, beam_size=5)  # beam_size from main.py
-                # print(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+                logger.debug(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()
         else:
@@ -235,7 +235,7 @@ def transcribe_audio_stream():
                 audio_np = np.ascontiguousarray(audio_np, dtype=np.float32)
                 # beam_size from main.py default, consider making it configurable for stream if needed
                 segments, info = MODEL.transcribe(audio_np, language="en", beam_size=3, best_of=3)
-                # print(f"Streamed: Detected language '{info.language}' with probability {info.language_probability:.2f}")
+                logger.debug(f"Streamed: Detected language '{info.language}' with probability {info.language_probability:.2f}")
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()
         else:

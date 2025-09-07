@@ -13,8 +13,6 @@ keywords = ["voice", "dictation", "speech-recognition", "whisper", "wayland"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
-    "Environment :: Linux",
-    "Environment :: Wayland",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",

@@ -6,14 +6,16 @@ readme = "README.md"
 requires-python = ">=3.11"  # Support Python 3.11+
 license = {text = "MIT"}
 authors = [
-    {name = "Talkat Contributors"}
+    {name = "Ronak Mehta"},
+    {name = "Opus 4, Opus 4.1, and Sonnet 4 via Claude Code"}
 ]
 keywords = ["voice", "dictation", "speech-recognition", "whisper", "wayland"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
+    "Environment :: Linux",
+    "Environment :: Wayland",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -35,10 +37,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/talkat"
-Documentation = "https://github.com/yourusername/talkat/blob/main/README.md"
-Repository = "https://github.com/yourusername/talkat"
-Issues = "https://github.com/yourusername/talkat/issues"
+Homepage = "https://github.com/ronakrm/talkat"
+Documentation = "https://github.com/ronakrm/talkat/blob/main/README.md"
+Repository = "https://github.com/ronakrm/talkat"
+Issues = "https://github.com/ronakrm/talkat/issues"
 
 [project.scripts]
 talkat = "talkat.cli:main"

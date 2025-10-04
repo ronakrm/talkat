@@ -96,6 +96,15 @@ cd "$APP_DIR"
 if [ "$SERVICE_TYPE" = "system" ]; then
     export UV_PYTHON_INSTALL_DIR="$APP_DIR/.venv/python"
     echo "Installing Python to shared location: $UV_PYTHON_INSTALL_DIR"
+
+    # Clean old venv if it exists and points to wrong location (e.g., /root/.local)
+    if [ -L "$APP_DIR/.venv/bin/python" ]; then
+        PYTHON_TARGET=$(readlink "$APP_DIR/.venv/bin/python")
+        if [[ "$PYTHON_TARGET" == /root/* ]]; then
+            echo "Removing old venv with inaccessible Python location..."
+            rm -rf "$APP_DIR/.venv"
+        fi
+    fi
 fi
 
 uv sync

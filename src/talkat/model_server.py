@@ -406,11 +406,24 @@ def transcribe_file():
     try:
         logger.info(f"Received file for transcription: {audio_file.filename}")
 
-        # Load audio file using librosa (auto-resamples to 16kHz mono)
-        logger.info("Loading and resampling audio file to 16kHz mono...")
-        audio_data, sample_rate = librosa.load(audio_file, sr=16000, mono=True)
-        duration = len(audio_data) / sample_rate
-        logger.info(f"Audio loaded: {duration:.1f} seconds at {sample_rate} Hz")
+        # Save uploaded file to a temporary location (librosa can't read FileStorage directly)
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file.filename)[1]) as tmp_file:
+            tmp_path = tmp_file.name
+            audio_file.save(tmp_path)
+
+        try:
+            # Load audio file using librosa (auto-resamples to 16kHz mono)
+            logger.info("Loading and resampling audio file to 16kHz mono...")
+            audio_data, sample_rate = librosa.load(tmp_path, sr=16000, mono=True)
+            duration = len(audio_data) / sample_rate
+            logger.info(f"Audio loaded: {duration:.1f} seconds at {sample_rate} Hz")
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
         text_result = ""
 

@@ -17,16 +17,20 @@ logger = get_logger(__name__)
 # Suppress ALSA-specific warnings only
 # These are harmless warnings from the ALSA library that we can't control
 if os.name == "posix":  # Only on Linux/Unix systems
-    from ctypes import cdll
+    from ctypes import CFUNCTYPE, c_char_p, c_int, cdll
 
     try:
         # Try to redirect ALSA error messages
-        def ERROR_HANDLER_FUNC():
-            return None
+        # ALSA error handler signature: void (*handler)(const char *file, int line, const char *function, int err, const char *fmt, ...)
+        ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
 
+        def py_error_handler(filename, line, function, err, fmt):
+            pass  # Suppress ALSA errors
+
+        c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
         asound = cdll.LoadLibrary("libasound.so.2")
-        asound.snd_lib_error_set_handler(ERROR_HANDLER_FUNC)
-    except (OSError, AttributeError):
+        asound.snd_lib_error_set_handler(c_error_handler)
+    except (OSError, AttributeError, TypeError):
         # Fallback: suppress PyAudio warnings if ALSA redirect fails
         warnings.filterwarnings("ignore", message=".*ALSA.*", category=RuntimeWarning)
         warnings.filterwarnings("ignore", message=".*jack.*", category=RuntimeWarning)

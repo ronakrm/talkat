@@ -6,8 +6,6 @@ import sys
 
 from .file_processor import batch_process_files, process_audio_file_command
 from .logging_config import get_logger, setup_logging
-from .main import main as client_main
-from .model_server import main as server_main
 from .process_manager import ProcessManager
 from .security import safe_subprocess_run
 
@@ -161,6 +159,9 @@ def main() -> None:
     setup_logging(verbose=args.verbose, quiet=args.quiet)
 
     if args.command == "listen":
+        # Lazy import to avoid loading audio modules for server command
+        from .main import main as client_main
+
         # Check if a listen process is already running
         existing_pid = get_listen_pid()
         if existing_pid:
@@ -171,6 +172,7 @@ def main() -> None:
             # Start a new listen process
             client_main()
     elif args.command == "long":
+        from .main import main as client_main
         client_main(mode="long")
     elif args.command == "start-long":
         sys.exit(start_long_background())
@@ -179,8 +181,11 @@ def main() -> None:
     elif args.command == "toggle-long":
         sys.exit(toggle_long_background())
     elif args.command == "server":
+        # Lazy import server to avoid loading audio modules
+        from .model_server import main as server_main
         server_main()
     elif args.command == "calibrate":
+        from .main import main as client_main
         # Run calibration through main with calibrate mode
         client_main(mode="calibrate")
     elif args.command == "file":

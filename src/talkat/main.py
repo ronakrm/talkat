@@ -190,6 +190,9 @@ def run_listen_command(
 
     text = ""  # Initialize text variable
 
+    # Load configuration
+    config = load_app_config()
+
     # Model loading is now handled by the model_server.py
     # We only need to prepare and send the audio data.
 

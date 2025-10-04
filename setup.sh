@@ -93,6 +93,12 @@ echo "Installing Python dependencies..."
 cd "$APP_DIR"
 uv sync
 
+# For system-wide installs, fix ownership so the service user can access the venv
+if [ "$SERVICE_TYPE" = "system" ]; then
+    echo "Setting ownership for user $USER_NAME..."
+    chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
+fi
+
 # Create service file
 echo "Creating $SERVICE_TYPE service..."
 if [ "$SERVICE_TYPE" = "system" ]; then

@@ -91,6 +91,13 @@ cp -r ./* "$APP_DIR/"
 # Install dependencies
 echo "Installing Python dependencies..."
 cd "$APP_DIR"
+
+# For system-wide installs, set UV_PYTHON_INSTALL_DIR to a shared location
+if [ "$SERVICE_TYPE" = "system" ]; then
+    export UV_PYTHON_INSTALL_DIR="$APP_DIR/.venv/python"
+    echo "Installing Python to shared location: $UV_PYTHON_INSTALL_DIR"
+fi
+
 uv sync
 
 # For system-wide installs, fix ownership so the service user can access the venv
@@ -111,6 +118,7 @@ After=network.target
 Type=simple
 User=$USER_NAME
 WorkingDirectory=$APP_DIR
+Environment="UV_PYTHON_INSTALL_DIR=/usr/share/talkat/.venv/python"
 ExecStart=/usr/bin/uv run talkat server
 Restart=always
 RestartSec=3

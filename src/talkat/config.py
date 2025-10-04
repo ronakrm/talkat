@@ -5,6 +5,7 @@ from .logging_config import get_logger
 from .paths import (
     CONFIG_DIR,
     CONFIG_FILE,
+    DICTIONARY_FILE,
     FASTER_WHISPER_CACHE_DIR,
     TRANSCRIPT_DIR,
     VOSK_CACHE_DIR,
@@ -64,6 +65,9 @@ CODE_DEFAULTS: dict[str, Any] = {
     "clipboard_on_long": True,
     "save_transcripts": True,
     "transcript_dir": str(TRANSCRIPT_DIR),
+
+    # Dictionary Configuration
+    "dictionary_file": str(DICTIONARY_FILE),
 }
 
 

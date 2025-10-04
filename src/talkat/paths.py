@@ -26,6 +26,7 @@ APP_NAME = "talkat"
 # Configuration files
 CONFIG_DIR = XDG_CONFIG_HOME / APP_NAME
 CONFIG_FILE = CONFIG_DIR / "config.json"
+DICTIONARY_FILE = CONFIG_DIR / "dictionary.txt"
 
 # Cache directories
 CACHE_DIR = XDG_CACHE_HOME / APP_NAME

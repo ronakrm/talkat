@@ -102,12 +102,18 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # Client mode (listen)
-    subparsers.add_parser(
+    listen_parser = subparsers.add_parser(
         "listen", help="Toggle voice recording - starts if not running, stops if already recording"
+    )
+    listen_parser.add_argument(
+        "-o", "--output", help="Save transcription to file instead of typing to screen"
     )
 
     # Long dictation mode
-    subparsers.add_parser("long", help="Start long dictation mode (continuous recording)")
+    long_parser = subparsers.add_parser("long", help="Start long dictation mode (continuous recording)")
+    long_parser.add_argument(
+        "-o", "--output", help="Save transcription to specified file instead of default location"
+    )
 
     # Start long dictation in background
     subparsers.add_parser("start-long", help="Start long dictation in background")
@@ -170,10 +176,10 @@ def main() -> None:
             sys.exit(stop_listen_process())
         else:
             # Start a new listen process
-            client_main()
+            client_main(output_file=args.output)
     elif args.command == "long":
         from .main import main as client_main
-        client_main(mode="long")
+        client_main(mode="long", output_file=args.output)
     elif args.command == "start-long":
         sys.exit(start_long_background())
     elif args.command == "stop-long":

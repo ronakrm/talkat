@@ -163,6 +163,7 @@ def run_listen_command(
     fw_compute_type: str = "int8",
     fw_device_index: int | list[int] = 0,
     vosk_model_base_dir: str | None = None,  # New parameter for Vosk model base
+    output_file: str | None = None,  # Optional output file
 ) -> int:
     """Runs the main speech-to-text process by sending audio to a model server."""
 
@@ -316,22 +317,36 @@ def run_listen_command(
                 transcript_path = save_transcript(text, mode="short")
                 logger.info(f"Transcript saved to: {transcript_path}")
 
-            try:
-                # Sanitize text before typing
-                safe_text = sanitize_text_for_typing(text)
-                safe_subprocess_run(["ydotool", "type", "--key-delay=1", safe_text], check=True)
-                logger.info(f"Typed: {text}")
+            # Check if output to file is requested
+            if output_file:
+                # Save to specified file instead of typing
+                from pathlib import Path
+                output_path = Path(output_file).expanduser()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(text, encoding='utf-8')
+                logger.info(f"Transcription saved to: {output_path}")
                 with contextlib.suppress(FileNotFoundError):
                     safe_subprocess_run(
-                        ["notify-send", "Talkat", f"Typed: {text[:100]}"], check=False
+                        ["notify-send", "Talkat", f"Saved to: {output_path.name}"], check=False
                     )
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                logger.warning("ydotool not available, printing text instead:")
-                print(f"TEXT: {text}")
-                with contextlib.suppress(FileNotFoundError):
-                    safe_subprocess_run(
-                        ["notify-send", "Talkat", f"Recognized: {text[:100]}"], check=False
-                    )
+            else:
+                # Type to screen using ydotool
+                try:
+                    # Sanitize text before typing
+                    safe_text = sanitize_text_for_typing(text)
+                    safe_subprocess_run(["ydotool", "type", "--key-delay=1", safe_text], check=True)
+                    logger.info(f"Typed: {text}")
+                    with contextlib.suppress(FileNotFoundError):
+                        safe_subprocess_run(
+                            ["notify-send", "Talkat", f"Typed: {text[:100]}"], check=False
+                        )
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    logger.warning("ydotool not available, printing text instead:")
+                    print(f"TEXT: {text}")
+                    with contextlib.suppress(FileNotFoundError):
+                        safe_subprocess_run(
+                            ["notify-send", "Talkat", f"Recognized: {text[:100]}"], check=False
+                        )
         else:
             logger.warning("No text recognized in the audio")
             with contextlib.suppress(FileNotFoundError):
@@ -365,6 +380,7 @@ def run_long_dictation_command(
     fw_device_index: int | list[int] = 0,
     vosk_model_base_dir: str | None = None,
     clipboard: bool = True,
+    output_file: str | None = None,  # Optional output file
 ):
     """Runs long dictation mode with continuous speech recognition."""
     # Set up process management for long dictation
@@ -392,13 +408,18 @@ def run_long_dictation_command(
         logger.info(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
 
     # Create a single transcript file for this session
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    transcript_filename = f"{timestamp}_long.txt"
-    transcript_dir = get_transcript_dir()
-    transcript_path = transcript_dir / transcript_filename
+    if output_file:
+        # Use user-specified output file
+        transcript_path = Path(output_file).expanduser()
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        # Use default timestamped file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        transcript_filename = f"{timestamp}_long.txt"
+        transcript_dir = get_transcript_dir()
+        transcript_path = transcript_dir / transcript_filename
 
     logger.info("Starting long dictation mode. Press Ctrl+C to stop.")
-    logger.info(f"Transcript directory: {transcript_dir}")
     logger.info(f"Transcript will be saved to: {transcript_path}")
 
     # Create empty file to ensure it exists
@@ -531,7 +552,7 @@ def run_long_dictation_command(
         cleanup_pid()
 
 
-def main(mode="listen"):
+def main(mode="listen", output_file=None):
     # Load config (defaults updated by file)
     initial_config = load_app_config()
 
@@ -676,6 +697,7 @@ def main(mode="listen"):
             fw_compute_type=args.fw_compute_type,
             fw_device_index=args.fw_device_index,
             vosk_model_base_dir=args.vosk_model_base_dir,
+            output_file=output_file,
         )
     elif args.command == "long":
         # Determine clipboard setting
@@ -685,6 +707,7 @@ def main(mode="listen"):
             model_type=args.model_type,
             model_name=args.model_name,
             silence_threshold=args.silence_threshold,
+            output_file=output_file,
             model_cache_dir=args.faster_whisper_model_cache_dir,
             fw_device=args.fw_device,
             fw_compute_type=args.fw_compute_type,

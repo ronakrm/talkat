@@ -172,3 +172,16 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# makepkg build artifacts (Arch packaging)
+src/*/
+pkg/
+*.pkg.tar*
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.src.tar.gz
+.SRCINFO
+
+# Keep PKGBUILD for AUR preparation branch
+# (but it will be gitignored on main branch)

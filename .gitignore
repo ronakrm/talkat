@@ -181,7 +181,5 @@ pkg/
 *.tar.xz
 *.tar.zst
 *.src.tar.gz
-.SRCINFO
 
-# Keep PKGBUILD for AUR preparation branch
-# (but it will be gitignored on main branch)
+# Keep PKGBUILD and .SRCINFO for dev ease

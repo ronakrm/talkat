@@ -2,6 +2,8 @@
 
 import argparse
 import contextlib
+import os
+import subprocess
 import sys
 
 from .file_processor import batch_process_files, process_audio_file_command
@@ -19,7 +21,7 @@ def get_long_pid() -> int | None:
     return pid if is_running else None
 
 
-def start_long_background() -> int:
+def start_long_background(debug: bool = False) -> int:
     """Start long dictation in background."""
     pm = ProcessManager("long_dictation")
 
@@ -28,13 +30,23 @@ def start_long_background() -> int:
             logger.info("Long dictation is already running.")
             return 1
 
-        pid = pm.start_background_process([sys.executable, "-m", "talkat.cli", "long"])
+        cmd = [sys.executable, "-m", "talkat.cli", "long"]
+
+        # Pass debug mode via environment variable
+        env = None
+        if debug:
+            env = os.environ.copy()
+            env["TALKAT_DEBUG"] = "1"
+
+        pid = pm.start_background_process(cmd, debug=debug, env=env)
 
         if pid:
             logger.info(f"Long dictation started in background (PID: {pid})")
             with contextlib.suppress(FileNotFoundError):
                 safe_subprocess_run(
-                    ["notify-send", "Talkat", "Long dictation started"], check=False
+                    ["notify-send", "Talkat", "Long dictation started"],
+                    check=False,
+                    stderr=subprocess.DEVNULL,
                 )
             return 0
         else:
@@ -50,22 +62,58 @@ def stop_long_background() -> int:
         if pm.stop_process():
             with contextlib.suppress(FileNotFoundError):
                 safe_subprocess_run(
-                    ["notify-send", "Talkat", "Long dictation stopped"], check=False
+                    ["notify-send", "Talkat", "Long dictation stopped"],
+                    check=False,
+                    stderr=subprocess.DEVNULL,
                 )
             return 0
         else:
             return 1
 
 
-def toggle_long_background() -> int:
+def toggle_long_background(debug: bool = False) -> int:
     """Toggle long dictation - start if stopped, stop if running."""
     pm = ProcessManager("long_dictation")
-    is_running, _ = pm.is_running()
 
-    if is_running:
-        return stop_long_background()
-    else:
-        return start_long_background()
+    with pm:  # Acquire lock to prevent race conditions
+        is_running, _ = pm.is_running()
+
+        if is_running:
+            # Stop the process (inline to avoid lock recursion)
+            if pm.stop_process():
+                with contextlib.suppress(FileNotFoundError):
+                    safe_subprocess_run(
+                        ["notify-send", "Talkat", "Long dictation stopped"],
+                        check=False,
+                        stderr=subprocess.DEVNULL,
+                    )
+                return 0
+            else:
+                return 1
+        else:
+            # Start the process (inline to avoid lock recursion)
+            cmd = [sys.executable, "-m", "talkat.cli", "long"]
+
+            # Pass debug mode via environment variable
+            env = None
+            if debug:
+                env = os.environ.copy()
+                env["TALKAT_DEBUG"] = "1"
+
+            pid = pm.start_background_process(cmd, debug=debug, env=env)
+
+            if pid:
+                logger.info(f"Long dictation started in background (PID: {pid})")
+                with contextlib.suppress(FileNotFoundError):
+                    safe_subprocess_run(
+                        ["notify-send", "Talkat", "Long dictation started"],
+                        check=False,
+                        stderr=subprocess.DEVNULL,
+                    )
+                return 0
+            else:
+                logger.error("Failed to start long dictation")
+                return 1
 
 
 def get_listen_pid() -> int | None:
@@ -83,7 +131,9 @@ def stop_listen_process() -> int:
         if pm.stop_process():
             with contextlib.suppress(FileNotFoundError):
                 safe_subprocess_run(
-                    ["notify-send", "Talkat", "Recording stopped, transcribing..."], check=False
+                    ["notify-send", "Talkat", "Recording stopped, transcribing..."],
+                    check=False,
+                    stderr=subprocess.DEVNULL,
                 )
             return 0
         else:
@@ -98,6 +148,9 @@ def main() -> None:
     )
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress all but ERROR messages"
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Enable debug mode (verbose logging + background process output)"
     )
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
@@ -161,8 +214,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Setup logging based on verbosity flags
-    setup_logging(verbose=args.verbose, quiet=args.quiet)
+    # Check for debug mode from environment variable (used by background processes)
+    env_debug = os.environ.get("TALKAT_DEBUG") == "1"
+
+    # Setup logging based on verbosity flags (debug implies verbose)
+    setup_logging(verbose=args.verbose or args.debug or env_debug, quiet=args.quiet)
 
     if args.command == "listen":
         # Lazy import to avoid loading audio modules for server command
@@ -181,11 +237,11 @@ def main() -> None:
         from .main import main as client_main
         client_main(mode="long", output_file=args.output)
     elif args.command == "start-long":
-        sys.exit(start_long_background())
+        sys.exit(start_long_background(debug=args.debug))
     elif args.command == "stop-long":
         sys.exit(stop_long_background())
     elif args.command == "toggle-long":
-        sys.exit(toggle_long_background())
+        sys.exit(toggle_long_background(debug=args.debug))
     elif args.command == "server":
         # Lazy import server to avoid loading audio modules
         from .model_server import main as server_main

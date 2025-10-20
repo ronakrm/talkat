@@ -385,13 +385,21 @@ def run_long_dictation_command(
     """Runs long dictation mode with continuous speech recognition."""
     # Set up process management for long dictation
     pm = ProcessManager("long_dictation")
-    pm.write_pid(os.getpid())
+
+    # Only write PID if not already written by parent process
+    # (avoids redundant write when started via start-long/toggle-long)
+    is_running, existing_pid = pm.is_running()
+    if existing_pid != os.getpid():
+        pm.write_pid(os.getpid())
 
     def cleanup_pid():
         pm.cleanup_pid_file()
 
     # Set up proper signal handling
     setup_signal_handlers(cleanup_func=cleanup_pid)
+
+    # Load configuration
+    config = load_app_config()
 
     # Use the passed silence_threshold
     current_threshold = silence_threshold
@@ -439,9 +447,11 @@ def run_long_dictation_command(
 
     try:
         while True:  # Continue until interrupted
+            logger.debug("Waiting for voice activity...")
             # Use the existing stream_audio_with_vad for each utterance
+            # Use configured threshold to detect utterances (not continuous streaming)
             audio_stream_generator_func = stream_audio_with_vad(
-                silence_threshold=0,  # No silence threshold for long mode
+                silence_threshold=current_threshold,
                 debug=False,  # Less verbose for continuous mode
                 max_duration=config.get("long_mode_max_duration", CODE_DEFAULTS["long_mode_max_duration"]),
             )
@@ -452,8 +462,10 @@ def run_long_dictation_command(
                 if not isinstance(sample_rate, int):
                     logger.error("stream_audio_with_vad did not yield sample rate correctly.")
                     continue  # Try again for next utterance
+                logger.debug(f"Got sample rate: {sample_rate}")
             except StopIteration:
                 # No speech detected in this cycle, wait a bit and try again
+                logger.debug("No speech detected, waiting...")
                 time.sleep(config.get("process_check_interval", CODE_DEFAULTS["process_check_interval"]))
                 continue
 
@@ -468,12 +480,14 @@ def run_long_dictation_command(
                         yield audio_chunk
 
             server_url = f"{config.get('server_url', CODE_DEFAULTS['server_url'])}/transcribe_stream"
+            logger.debug(f"Sending audio to {server_url}...")
             try:
                 response = session.post(
                     server_url,
                     data=request_data_generator(sample_rate, audio_stream_generator_func),
                     timeout=config.get("http_timeout", CODE_DEFAULTS["http_timeout"]),
                 )
+                logger.debug(f"Got response with status code: {response.status_code}")
                 response.raise_for_status()
 
                 response_json = response.json()
@@ -489,6 +503,8 @@ def run_long_dictation_command(
 
                     # Don't type in long dictation mode
                     logger.debug("(Saved to transcript)")
+                else:
+                    logger.debug("Empty transcription received")
 
             except requests.exceptions.ConnectionError:
                 logger.error(f"Could not connect to the model server at {server_url}.")

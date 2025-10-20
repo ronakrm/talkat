@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from .logging_config import get_logger
-from .paths import LOCK_DIR, PID_DIR
+from .paths import LOCK_DIR, LOG_DIR, PID_DIR
 
 logger = get_logger(__name__)
 
@@ -215,22 +215,35 @@ class ProcessManager:
             logger.error(f"Error stopping process: {e}")
             return False
 
-    def start_background_process(self, cmd: list[str]) -> int | None:
+    def start_background_process(self, cmd: list[str], debug: bool = False, env: dict | None = None) -> int | None:
         """
         Start a background process with proper signal handling.
 
         Args:
             cmd: Command and arguments to run
+            debug: If True, redirect output to log files instead of DEVNULL
+            env: Optional environment variables to pass to the process
 
         Returns:
             PID of started process or None on failure
         """
         try:
+            # Determine where to redirect output
+            if debug:
+                # Ensure log directory exists
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                log_file = LOG_DIR / f"{self.process_name}_debug.log"
+                logger.info(f"Debug mode: output will be written to {log_file}")
+                stdout = stderr = open(log_file, "a")
+            else:
+                stdout = stderr = subprocess.DEVNULL
+
             # Start process in new session to prevent signal propagation
             process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout,
+                stderr=stderr,
+                env=env,
                 start_new_session=True,
                 # Properly handle signals
                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),

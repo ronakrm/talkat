@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 # Suppress ALSA-specific warnings only
 # These are harmless warnings from the ALSA library that we can't control
 if os.name == "posix":  # Only on Linux/Unix systems
-    from ctypes import ArgumentError, CFUNCTYPE, c_char_p, c_int, cdll
+    from ctypes import CFUNCTYPE, ArgumentError, c_char_p, c_int, cdll
 
     try:
         # Try to redirect ALSA error messages
@@ -70,8 +70,11 @@ def calibrate_microphone(duration: int = 10) -> float:
         logger.warning("No microphone found during calibration, using default threshold.")
         # Load configuration for fallback threshold
         from .config import CODE_DEFAULTS, load_app_config
+
         config = load_app_config()
-        return config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        return float(
+            config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        )
 
     p = pyaudio.PyAudio()
 
@@ -89,8 +92,11 @@ def calibrate_microphone(duration: int = 10) -> float:
         p.terminate()
         # Load configuration for fallback threshold
         from .config import CODE_DEFAULTS, load_app_config
+
         config = load_app_config()
-        return config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        return float(
+            config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        )
 
     volumes: list[float] = []
     chunks_to_read: int = int(duration * RATE / CHUNK)
@@ -122,8 +128,11 @@ def calibrate_microphone(duration: int = 10) -> float:
     if not volumes:
         # Load configuration for fallback threshold
         from .config import CODE_DEFAULTS, load_app_config
+
         config = load_app_config()
-        return config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        return float(
+            config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        )
 
     # Calculate statistics using percentiles for better noise floor estimation
     volumes_array = np.array(volumes)
@@ -145,11 +154,12 @@ def calibrate_microphone(duration: int = 10) -> float:
 
     # Load configuration for threshold limits
     from .config import CODE_DEFAULTS, load_app_config
+
     config = load_app_config()
-    
+
     threshold_min = config.get("silence_threshold_min", CODE_DEFAULTS["silence_threshold_min"])
     threshold_max = config.get("silence_threshold_max", CODE_DEFAULTS["silence_threshold_max"])
-    
+
     # Ensure threshold is within configured bounds
     threshold = max(threshold, threshold_min)
     threshold = min(threshold, threshold_max)
@@ -183,29 +193,38 @@ def calibrate_microphone(duration: int = 10) -> float:
 
 
 def record_audio_with_vad(
-    silence_threshold: float | None = None, silence_duration: float | None = None, debug: bool = True
+    silence_threshold: float | None = None,
+    silence_duration: float | None = None,
+    debug: bool = True,
 ) -> tuple[bytes, int] | None:
     """Record with improved VAD: pre-speech padding, defined speech segments, and clear stopping."""
     # Load configuration
     from .config import CODE_DEFAULTS, load_app_config
+
     config = load_app_config()
-    
+
     CHUNK = 1024
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     RATE = 16000
 
     # VAD Configuration from config
-    PRE_SPEECH_PADDING_DURATION: float = config.get("pre_speech_padding", CODE_DEFAULTS["pre_speech_padding"])
-    MAX_RECORDING_DURATION_SECONDS: float = config.get("max_recording_duration", CODE_DEFAULTS["max_recording_duration"])
+    PRE_SPEECH_PADDING_DURATION: float = config.get(
+        "pre_speech_padding", CODE_DEFAULTS["pre_speech_padding"]
+    )
+    MAX_RECORDING_DURATION_SECONDS: float = config.get(
+        "max_recording_duration", CODE_DEFAULTS["max_recording_duration"]
+    )
 
     if silence_threshold is None:
         # This path should ideally not be hit if main.py provides a threshold.
         logger.warning(
             "silence_threshold not provided to record_audio_with_vad. Using a default fallback."
         )
-        silence_threshold = config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
-        
+        silence_threshold = config.get(
+            "silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"]
+        )
+
     if silence_duration is None:
         silence_duration = config.get("silence_duration", CODE_DEFAULTS["silence_duration"])
 
@@ -393,15 +412,18 @@ def stream_audio_with_vad(
 
     # Load configuration
     from .config import CODE_DEFAULTS, load_app_config
+
     config = load_app_config()
 
     # VAD Configuration from config
-    PRE_SPEECH_PADDING_DURATION: float = config.get("pre_speech_padding", CODE_DEFAULTS["pre_speech_padding"])
-    
+    PRE_SPEECH_PADDING_DURATION: float = config.get(
+        "pre_speech_padding", CODE_DEFAULTS["pre_speech_padding"]
+    )
+
     # Use configured max duration if not provided
     if max_duration is None:
         max_duration = config.get("max_recording_duration", CODE_DEFAULTS["max_recording_duration"])
-    
+
     MAX_RECORDING_DURATION_SECONDS: float = (
         max_duration if max_duration is not None else float("inf")
     )
@@ -410,7 +432,9 @@ def stream_audio_with_vad(
         logger.warning(
             "silence_threshold not provided to stream_audio_with_vad. Using a default fallback."
         )
-        silence_threshold = config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
+        silence_threshold = config.get(
+            "silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"]
+        )
 
     # If silence_threshold is 0, disable VAD and stream continuously
     no_vad_mode: bool = silence_threshold == 0

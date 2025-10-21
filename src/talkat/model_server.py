@@ -16,6 +16,7 @@ from talkat.logging_config import get_logger
 try:
     import librosa
     import soundfile  # noqa: F401
+
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
@@ -57,7 +58,7 @@ def load_dictionary() -> list[str]:
         return []
 
     try:
-        with open(dictionary_path, "r", encoding="utf-8") as f:
+        with open(dictionary_path, encoding="utf-8") as f:
             # Read lines, strip whitespace, and filter out empty lines
             words = [line.strip() for line in f if line.strip()]
 
@@ -255,11 +256,11 @@ def transcribe_audio():
                 # Use dictionary as initial_prompt if available
                 initial_prompt = get_initial_prompt()
                 segments, info = MODEL.transcribe(
-                    audio_np,
-                    beam_size=5,
-                    initial_prompt=initial_prompt
+                    audio_np, beam_size=5, initial_prompt=initial_prompt
                 )
-                logger.debug(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+                logger.debug(
+                    f"Detected language '{info.language}' with probability {info.language_probability:.2f}"
+                )
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()
         else:
@@ -349,13 +350,11 @@ def transcribe_audio_stream():
                 # Use dictionary as initial_prompt if available
                 initial_prompt = get_initial_prompt()
                 segments, info = MODEL.transcribe(
-                    audio_np,
-                    language="en",
-                    beam_size=3,
-                    best_of=3,
-                    initial_prompt=initial_prompt
+                    audio_np, language="en", beam_size=3, best_of=3, initial_prompt=initial_prompt
                 )
-                logger.debug(f"Streamed: Detected language '{info.language}' with probability {info.language_probability:.2f}")
+                logger.debug(
+                    f"Streamed: Detected language '{info.language}' with probability {info.language_probability:.2f}"
+                )
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()
         else:
@@ -389,18 +388,20 @@ def transcribe_file():
 
     # Check if librosa is available
     if not LIBROSA_AVAILABLE:
-        return jsonify({
-            "error": "librosa and soundfile are required for file processing",
-            "hint": "Install them with: pip install librosa soundfile"
-        }), 500
+        return jsonify(
+            {
+                "error": "librosa and soundfile are required for file processing",
+                "hint": "Install them with: pip install librosa soundfile",
+            }
+        ), 500
 
     # Check if file was uploaded
-    if 'audio' not in request.files:
+    if "audio" not in request.files:
         return jsonify({"error": "No audio file provided in request"}), 400
 
-    audio_file = request.files['audio']
+    audio_file = request.files["audio"]
 
-    if audio_file.filename == '':
+    if audio_file.filename == "":
         return jsonify({"error": "Empty filename"}), 400
 
     try:
@@ -408,7 +409,10 @@ def transcribe_file():
 
         # Save uploaded file to a temporary location (librosa can't read FileStorage directly)
         import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file.filename)[1]) as tmp_file:
+
+        # Get file extension, defaulting to empty string if filename is None
+        file_ext = os.path.splitext(audio_file.filename or "")[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
             tmp_path = tmp_file.name
             audio_file.save(tmp_path)
 
@@ -464,11 +468,11 @@ def transcribe_file():
                 # Use dictionary as initial_prompt if available
                 initial_prompt = get_initial_prompt()
                 segments, info = MODEL.transcribe(
-                    audio_data,
-                    beam_size=5,
-                    initial_prompt=initial_prompt
+                    audio_data, beam_size=5, initial_prompt=initial_prompt
                 )
-                logger.debug(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+                logger.debug(
+                    f"Detected language '{info.language}' with probability {info.language_probability:.2f}"
+                )
                 recognized_texts = [segment.text for segment in segments]
                 text_result = "".join(recognized_texts).strip()
 
@@ -485,6 +489,7 @@ def transcribe_file():
     except Exception as e:
         logger.error(f"Error during file transcription: {e}")
         import traceback
+
         traceback.print_exc()
 
         # Provide more helpful error messages for common issues
@@ -516,10 +521,7 @@ def get_dictionary():
     """
     global DICTIONARY_WORDS
 
-    return jsonify({
-        "words": DICTIONARY_WORDS,
-        "count": len(DICTIONARY_WORDS)
-    }), 200
+    return jsonify({"words": DICTIONARY_WORDS, "count": len(DICTIONARY_WORDS)}), 200
 
 
 @app.route("/dictionary", methods=["POST"])
@@ -536,18 +538,18 @@ def update_dictionary():
     global DICTIONARY_WORDS, MODEL_REC, MODEL_TYPE
 
     # Check if file was uploaded
-    if 'dictionary' not in request.files:
+    if "dictionary" not in request.files:
         return jsonify({"error": "No dictionary file provided in request"}), 400
 
-    dictionary_file = request.files['dictionary']
+    dictionary_file = request.files["dictionary"]
 
-    if dictionary_file.filename == '':
+    if dictionary_file.filename == "":
         return jsonify({"error": "Empty filename"}), 400
 
     try:
         # Read the uploaded file
-        content = dictionary_file.read().decode('utf-8')
-        lines = content.split('\n')
+        content = dictionary_file.read().decode("utf-8")
+        lines = content.split("\n")
 
         # Filter out empty lines and strip whitespace
         words = [line.strip() for line in lines if line.strip()]
@@ -558,7 +560,10 @@ def update_dictionary():
 
         # Get config to find dictionary file path
         config = load_app_config()
-        dictionary_path = os.path.expanduser(config.get("dictionary_file"))
+        dictionary_file_path = config.get("dictionary_file")
+        if not dictionary_file_path:
+            return jsonify({"error": "Dictionary file path not configured"}), 500
+        dictionary_path = os.path.expanduser(str(dictionary_file_path))
 
         # Warn about overwrite if file exists
         if os.path.exists(dictionary_path):
@@ -568,8 +573,8 @@ def update_dictionary():
         os.makedirs(os.path.dirname(dictionary_path), exist_ok=True)
 
         # Save to file
-        with open(dictionary_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(words))
+        with open(dictionary_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(words))
 
         # Update global dictionary
         DICTIONARY_WORDS = words
@@ -579,18 +584,21 @@ def update_dictionary():
         if MODEL_TYPE == "vosk" and MODEL_REC:
             apply_vosk_dictionary(MODEL_REC)
 
-        return jsonify({
-            "success": True,
-            "count": len(words),
-            "message": f"Dictionary updated with {len(words)} words",
-            "note": "faster-whisper will use these words as hints. Vosk has limited dictionary support."
-        }), 200
+        return jsonify(
+            {
+                "success": True,
+                "count": len(words),
+                "message": f"Dictionary updated with {len(words)} words",
+                "note": "faster-whisper will use these words as hints. Vosk has limited dictionary support.",
+            }
+        ), 200
 
     except UnicodeDecodeError:
         return jsonify({"error": "Dictionary file must be UTF-8 encoded text"}), 400
     except Exception as e:
         logger.error(f"Error updating dictionary: {e}")
         import traceback
+
         traceback.print_exc()
         return jsonify({"error": f"Failed to update dictionary: {str(e)}"}), 500
 

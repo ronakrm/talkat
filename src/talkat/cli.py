@@ -30,7 +30,7 @@ def start_long_background(debug: bool = False) -> int:
             logger.info("Long dictation is already running.")
             return 1
 
-        cmd = [sys.executable, "-m", "talkat.cli", "long"]
+        cmd = [sys.executable, "-m", "talkat.cli", "long", "--background"]
 
         # Pass debug mode via environment variable
         env = None
@@ -92,7 +92,7 @@ def toggle_long_background(debug: bool = False) -> int:
                 return 1
         else:
             # Start the process (inline to avoid lock recursion)
-            cmd = [sys.executable, "-m", "talkat.cli", "long"]
+            cmd = [sys.executable, "-m", "talkat.cli", "long", "--background"]
 
             # Pass debug mode via environment variable
             env = None
@@ -150,7 +150,9 @@ def main() -> None:
         "-q", "--quiet", action="store_true", help="Suppress all but ERROR messages"
     )
     parser.add_argument(
-        "--debug", action="store_true", help="Enable debug mode (verbose logging + background process output)"
+        "--debug",
+        action="store_true",
+        help="Enable debug mode (verbose logging + background process output)",
     )
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
@@ -163,9 +165,14 @@ def main() -> None:
     )
 
     # Long dictation mode
-    long_parser = subparsers.add_parser("long", help="Start long dictation mode (continuous recording)")
+    long_parser = subparsers.add_parser(
+        "long", help="Start long dictation mode (continuous recording)"
+    )
     long_parser.add_argument(
         "-o", "--output", help="Save transcription to specified file instead of default location"
+    )
+    long_parser.add_argument(
+        "--background", action="store_true", help="Run in background mode (internal use)"
     )
 
     # Start long dictation in background
@@ -235,7 +242,8 @@ def main() -> None:
             client_main(output_file=args.output)
     elif args.command == "long":
         from .main import main as client_main
-        client_main(mode="long", output_file=args.output)
+
+        client_main(mode="long", output_file=args.output, background=args.background)
     elif args.command == "start-long":
         sys.exit(start_long_background(debug=args.debug))
     elif args.command == "stop-long":
@@ -245,9 +253,11 @@ def main() -> None:
     elif args.command == "server":
         # Lazy import server to avoid loading audio modules
         from .model_server import main as server_main
+
         server_main()
     elif args.command == "calibrate":
         from .main import main as client_main
+
         # Run calibration through main with calibrate mode
         client_main(mode="calibrate")
     elif args.command == "file":

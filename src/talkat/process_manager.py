@@ -40,16 +40,17 @@ class ProcessManager:
         """
         if timeout is None:
             from .config import CODE_DEFAULTS, load_app_config
+
             config = load_app_config()
             timeout = config.get("lock_acquire_timeout", CODE_DEFAULTS["lock_acquire_timeout"])
-            
+
         try:
             self._lock_fd = os.open(str(self.lock_file), os.O_CREAT | os.O_WRONLY)
 
             # Try to acquire lock with timeout
             start_time = time.time()
             retry_interval = None
-            
+
             while time.time() - start_time < timeout:
                 try:
                     fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -58,8 +59,11 @@ class ProcessManager:
                 except OSError:
                     if retry_interval is None:
                         from .config import CODE_DEFAULTS, load_app_config
+
                         config = load_app_config()
-                        retry_interval = config.get("lock_retry_interval", CODE_DEFAULTS["lock_retry_interval"])
+                        retry_interval = config.get(
+                            "lock_retry_interval", CODE_DEFAULTS["lock_retry_interval"]
+                        )
                     time.sleep(retry_interval)
 
             logger.warning(f"Failed to acquire lock for {self.process_name} within {timeout}s")
@@ -162,9 +166,10 @@ class ProcessManager:
         """
         if timeout is None:
             from .config import CODE_DEFAULTS, load_app_config
+
             config = load_app_config()
             timeout = config.get("process_stop_timeout", CODE_DEFAULTS["process_stop_timeout"])
-        
+
         is_running, pid = self.is_running()
         if not is_running or pid is None:
             logger.info(f"No {self.process_name} process to stop")
@@ -177,8 +182,11 @@ class ProcessManager:
 
             # Load check interval from config
             from .config import CODE_DEFAULTS, load_app_config
+
             config = load_app_config()
-            check_interval = config.get("process_check_interval", CODE_DEFAULTS["process_check_interval"])
+            check_interval = config.get(
+                "process_check_interval", CODE_DEFAULTS["process_check_interval"]
+            )
 
             # Wait for process to terminate
             start_time = time.time()
@@ -203,7 +211,9 @@ class ProcessManager:
                 # Still running, force kill
                 logger.error(f"Process {pid} won't stop, sending SIGKILL")
                 os.kill(pid, signal.SIGKILL)
-                background_delay = config.get("background_process_delay", CODE_DEFAULTS["background_process_delay"])
+                background_delay = config.get(
+                    "background_process_delay", CODE_DEFAULTS["background_process_delay"]
+                )
                 time.sleep(background_delay)
             except ProcessLookupError:
                 pass
@@ -215,7 +225,9 @@ class ProcessManager:
             logger.error(f"Error stopping process: {e}")
             return False
 
-    def start_background_process(self, cmd: list[str], debug: bool = False, env: dict | None = None) -> int | None:
+    def start_background_process(
+        self, cmd: list[str], debug: bool = False, env: dict | None = None
+    ) -> int | None:
         """
         Start a background process with proper signal handling.
 
@@ -229,14 +241,19 @@ class ProcessManager:
         """
         try:
             # Determine where to redirect output
+            from typing import IO
+
             if debug:
                 # Ensure log directory exists
                 LOG_DIR.mkdir(parents=True, exist_ok=True)
                 log_file = LOG_DIR / f"{self.process_name}_debug.log"
                 logger.info(f"Debug mode: output will be written to {log_file}")
-                stdout = stderr = open(log_file, "a")
+                log_handle: IO[str] = open(log_file, "a")
+                stdout: int | IO[str] = log_handle
+                stderr: int | IO[str] = log_handle
             else:
-                stdout = stderr = subprocess.DEVNULL
+                stdout = subprocess.DEVNULL
+                stderr = subprocess.DEVNULL
 
             # Start process in new session to prevent signal propagation
             process = subprocess.Popen(

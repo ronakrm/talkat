@@ -16,7 +16,7 @@ import requests  # Added for HTTP calls
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
 from .logging_config import get_logger
 from .paths import TRANSCRIPT_DIR
-from .process_manager import ProcessManager, setup_signal_handlers
+from .process_manager import ProcessManager
 from .record import calibrate_microphone, stream_audio_with_vad
 from .security import (
     safe_subprocess_run,
@@ -271,9 +271,9 @@ def run_listen_command(
         try:
             # Increased timeout for potentially long streaming and server processing
             response = requests.post(
-                server_url, 
-                data=request_data_generator(), 
-                timeout=config.get("http_timeout", CODE_DEFAULTS["http_timeout"])
+                server_url,
+                data=request_data_generator(),
+                timeout=config.get("http_timeout", CODE_DEFAULTS["http_timeout"]),
             )
             response.raise_for_status()
 
@@ -321,9 +321,10 @@ def run_listen_command(
             if output_file:
                 # Save to specified file instead of typing
                 from pathlib import Path
+
                 output_path = Path(output_file).expanduser()
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_text(text, encoding='utf-8')
+                output_path.write_text(text, encoding="utf-8")
                 logger.info(f"Transcription saved to: {output_path}")
                 with contextlib.suppress(FileNotFoundError):
                     safe_subprocess_run(
@@ -381,8 +382,11 @@ def run_long_dictation_command(
     vosk_model_base_dir: str | None = None,
     clipboard: bool = True,
     output_file: str | None = None,  # Optional output file
+    background: bool = False,  # Whether this is a background process
 ):
     """Runs long dictation mode with continuous speech recognition."""
+    import threading
+
     # Set up process management for long dictation
     pm = ProcessManager("long_dictation")
 
@@ -392,11 +396,23 @@ def run_long_dictation_command(
     if existing_pid != os.getpid():
         pm.write_pid(os.getpid())
 
+    # Use a flag to signal graceful shutdown
+    shutdown_requested = threading.Event()
+
     def cleanup_pid():
         pm.cleanup_pid_file()
 
-    # Set up proper signal handling
-    setup_signal_handlers(cleanup_func=cleanup_pid)
+    # Custom signal handler that sets flag instead of exiting immediately
+    def graceful_shutdown_handler(signum, frame):
+        logger.info(f"Received signal {signum}, finishing current utterance...")
+        shutdown_requested.set()
+
+    # Register our custom signal handler
+    import signal
+
+    signal.signal(signal.SIGINT, graceful_shutdown_handler)
+    signal.signal(signal.SIGTERM, graceful_shutdown_handler)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     # Load configuration
     config = load_app_config()
@@ -416,44 +432,68 @@ def run_long_dictation_command(
         logger.info(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
 
     # Create a single transcript file for this session
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if output_file:
         # Use user-specified output file
         transcript_path = Path(output_file).expanduser()
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_filename = transcript_path.name
     else:
         # Use default timestamped file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         transcript_filename = f"{timestamp}_long.txt"
         transcript_dir = get_transcript_dir()
         transcript_path = transcript_dir / transcript_filename
 
-    logger.info("Starting long dictation mode. Press Ctrl+C to stop.")
-    logger.info(f"Transcript will be saved to: {transcript_path}")
-
     # Create empty file to ensure it exists
     transcript_path.touch()
 
-    if clipboard:
-        logger.info("Transcript will be copied to clipboard when finished.")
-
-    with contextlib.suppress(FileNotFoundError):
-        safe_subprocess_run(
-            ["notify-send", "Talkat", "Long dictation mode started. Press Ctrl+C to stop."],
-            check=False,
-        )
+    if background:
+        logger.info("Starting long dictation mode (background).")
+        logger.info(f"Transcript will be saved to: {transcript_path}")
+        logger.info("Run 'talkat stop-long' or 'talkat toggle-long' to stop.")
+        if clipboard:
+            logger.info("Transcript will be copied to clipboard when finished.")
+        with contextlib.suppress(FileNotFoundError):
+            safe_subprocess_run(
+                [
+                    "notify-send",
+                    "Talkat",
+                    "Long dictation started. Run 'talkat toggle-long' to stop.",
+                ],
+                check=False,
+            )
+    else:
+        logger.info("Starting long dictation mode. Press Ctrl+C to stop.")
+        logger.info(f"Transcript will be saved to: {transcript_path}")
+        if clipboard:
+            logger.info("Transcript will be copied to clipboard when finished.")
+        with contextlib.suppress(FileNotFoundError):
+            safe_subprocess_run(
+                ["notify-send", "Talkat", "Long dictation mode started. Press Ctrl+C to stop."],
+                check=False,
+            )
 
     full_transcript = []
     session = requests.Session()
+    return_code = 0  # Track return code
 
     try:
-        while True:  # Continue until interrupted
+        while not shutdown_requested.is_set():  # Continue until shutdown requested
             logger.debug("Waiting for voice activity...")
+
+            # Check shutdown flag before starting new utterance
+            if shutdown_requested.is_set():
+                logger.info("Shutdown requested before starting new utterance")
+                break
+
             # Use the existing stream_audio_with_vad for each utterance
             # Use configured threshold to detect utterances (not continuous streaming)
             audio_stream_generator_func = stream_audio_with_vad(
                 silence_threshold=current_threshold,
                 debug=False,  # Less verbose for continuous mode
-                max_duration=config.get("long_mode_max_duration", CODE_DEFAULTS["long_mode_max_duration"]),
+                max_duration=config.get(
+                    "long_mode_max_duration", CODE_DEFAULTS["long_mode_max_duration"]
+                ),
             )
 
             # Get the sample rate first
@@ -466,8 +506,14 @@ def run_long_dictation_command(
             except StopIteration:
                 # No speech detected in this cycle, wait a bit and try again
                 logger.debug("No speech detected, waiting...")
-                time.sleep(config.get("process_check_interval", CODE_DEFAULTS["process_check_interval"]))
+                time.sleep(
+                    config.get("process_check_interval", CODE_DEFAULTS["process_check_interval"])
+                )
                 continue
+
+            # If shutdown was requested while waiting for speech, finish this utterance
+            if shutdown_requested.is_set():
+                logger.info("Shutdown requested, will finish transcribing current utterance")
 
             # Collect audio data for this utterance
             def request_data_generator(rate, stream_gen):
@@ -475,11 +521,14 @@ def run_long_dictation_command(
                 metadata = {"rate": rate}
                 yield json.dumps(metadata).encode("utf-8") + b"\n"
                 # Then, stream audio chunks
+                # Continue streaming even if shutdown is requested - we want to finish this utterance
                 for audio_chunk in stream_gen:
                     if audio_chunk:
                         yield audio_chunk
 
-            server_url = f"{config.get('server_url', CODE_DEFAULTS['server_url'])}/transcribe_stream"
+            server_url = (
+                f"{config.get('server_url', CODE_DEFAULTS['server_url'])}/transcribe_stream"
+            )
             logger.debug(f"Sending audio to {server_url}...")
             try:
                 response = session.post(
@@ -513,16 +562,36 @@ def run_long_dictation_command(
                     safe_subprocess_run(
                         ["notify-send", "Talkat", "Error: Model server not reachable."], check=False
                     )
-                return 1
+                return_code = 1
+                break  # Exit loop on connection error
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error communicating with model server: {e}")
+                if shutdown_requested.is_set():
+                    break  # Exit if shutdown was requested
                 continue  # Try next utterance
             except json.JSONDecodeError:
                 logger.error("Could not decode JSON response from server")
+                if shutdown_requested.is_set():
+                    break  # Exit if shutdown was requested
                 continue  # Try next utterance
 
+            # Check if we should exit after processing this utterance
+            if shutdown_requested.is_set():
+                logger.info("Shutdown complete after finishing utterance")
+                break
+
     except KeyboardInterrupt:
-        logger.info("\nLong dictation mode stopped.")
+        # Handle Ctrl+C in foreground mode
+        logger.info("\nLong dictation mode stopped (Ctrl+C).")
+    except Exception as e:
+        logger.error(f"Error in long dictation mode: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return_code = 1
+    finally:
+        # Always run cleanup, regardless of how we exit
+        logger.info("Cleaning up long dictation session...")
 
         # Close the session cleanly
         session.close()
@@ -530,45 +599,39 @@ def run_long_dictation_command(
         # Join all transcript parts
         full_text = " ".join(full_transcript)
 
-        if full_text and clipboard:
-            if copy_to_clipboard(full_text):
-                logger.info("Transcript copied to clipboard!")
-                with contextlib.suppress(FileNotFoundError):
-                    safe_subprocess_run(
-                        ["notify-send", "Talkat", "Transcript copied to clipboard"], check=False
-                    )
-            else:
-                logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
+        if full_text:
+            # Copy to clipboard if enabled
+            if clipboard:
+                if copy_to_clipboard(full_text):
+                    logger.info("Transcript copied to clipboard!")
+                    with contextlib.suppress(FileNotFoundError):
+                        safe_subprocess_run(
+                            ["notify-send", "Talkat", "Transcript copied to clipboard"], check=False
+                        )
+                else:
+                    logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
 
-        logger.info(f"Full transcript saved to: {transcript_path}")
-        logger.info(f"Total words: {len(full_text.split())}")
+            logger.info(f"Full transcript saved to: {transcript_path}")
+            logger.info(f"Total words: {len(full_text.split())}")
 
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(
-                [
-                    "notify-send",
-                    "Talkat",
-                    f"Long dictation stopped. Saved to {transcript_filename}",
-                ],
-                check=False,
-            )
+            with contextlib.suppress(FileNotFoundError):
+                safe_subprocess_run(
+                    [
+                        "notify-send",
+                        "Talkat",
+                        f"Long dictation stopped. Saved to {transcript_filename}",
+                    ],
+                    check=False,
+                )
+        else:
+            logger.info("No transcript to save (no speech detected)")
 
         cleanup_pid()
-        return 0
-    except Exception as e:
-        logger.error(f"Error in long dictation mode: {e}")
-        import traceback
 
-        traceback.print_exc()
-        session.close()
-        cleanup_pid()
-        return 1
-    finally:
-        session.close()
-        cleanup_pid()
+    return return_code
 
 
-def main(mode="listen", output_file=None):
+def main(mode="listen", output_file=None, background=False):
     # Load config (defaults updated by file)
     initial_config = load_app_config()
 
@@ -682,6 +745,13 @@ def main(mode="listen", output_file=None):
         help="Directory to save transcripts.",
     )
 
+    # Internal arguments (used by background process launcher)
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help=argparse.SUPPRESS,  # Hide from help text since it's internal
+    )
+
     args = parser.parse_args()
 
     # After parsing, args contains the final values following CLI > File > Code_Default hierarchy
@@ -719,6 +789,9 @@ def main(mode="listen", output_file=None):
         # Determine clipboard setting
         clipboard_enabled = initial_config.get("clipboard_on_long", True) and not args.no_clipboard
 
+        # Use background flag from either function parameter or CLI argument
+        is_background = background or args.background
+
         return run_long_dictation_command(
             model_type=args.model_type,
             model_name=args.model_name,
@@ -730,6 +803,7 @@ def main(mode="listen", output_file=None):
             fw_device_index=args.fw_device_index,
             vosk_model_base_dir=args.vosk_model_base_dir,
             clipboard=clipboard_enabled,
+            background=is_background,
         )
     else:
         parser.print_help()

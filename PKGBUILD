@@ -26,9 +26,11 @@ sha256sums=('f6ef256b98c3690c0c87e7b3f439a2c69c1473d5091fb3f2da039ffe2d461198')
 build() {
     cd "$pkgname-$pkgver"
 
-    # Install Python dependencies using uv
-    # This creates a .venv with all dependencies from pyproject.toml
-    uv sync --frozen
+    # Create virtual environment and install dependencies using uv
+    # We don't use 'uv sync' because it requires a lockfile (uv.lock)
+    # Instead, we use 'uv venv' + 'uv pip install' which reads from pyproject.toml
+    uv venv
+    uv pip install -e .
 }
 
 package() {

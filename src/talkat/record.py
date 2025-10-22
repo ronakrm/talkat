@@ -7,7 +7,7 @@ from collections.abc import Generator
 import numpy as np
 import pyaudio
 
-from .config import load_app_config
+from .config import CODE_DEFAULTS, load_app_config
 from .devices import find_microphone
 from .logging_config import get_logger
 from .security import safe_subprocess_run
@@ -69,8 +69,6 @@ def calibrate_microphone(duration: int = 10) -> float:
     if mic_index is None:
         logger.warning("No microphone found during calibration, using default threshold.")
         # Load configuration for fallback threshold
-        from .config import CODE_DEFAULTS, load_app_config
-
         config = load_app_config()
         return float(
             config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
@@ -91,8 +89,6 @@ def calibrate_microphone(duration: int = 10) -> float:
         logger.error(f"Error opening audio stream for calibration: {e}")
         p.terminate()
         # Load configuration for fallback threshold
-        from .config import CODE_DEFAULTS, load_app_config
-
         config = load_app_config()
         return float(
             config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
@@ -127,8 +123,6 @@ def calibrate_microphone(duration: int = 10) -> float:
 
     if not volumes:
         # Load configuration for fallback threshold
-        from .config import CODE_DEFAULTS, load_app_config
-
         config = load_app_config()
         return float(
             config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
@@ -153,8 +147,6 @@ def calibrate_microphone(duration: int = 10) -> float:
     threshold: float = p95
 
     # Load configuration for threshold limits
-    from .config import CODE_DEFAULTS, load_app_config
-
     config = load_app_config()
 
     threshold_min = config.get("silence_threshold_min", CODE_DEFAULTS["silence_threshold_min"])
@@ -199,8 +191,6 @@ def record_audio_with_vad(
 ) -> tuple[bytes, int] | None:
     """Record with improved VAD: pre-speech padding, defined speech segments, and clear stopping."""
     # Load configuration
-    from .config import CODE_DEFAULTS, load_app_config
-
     config = load_app_config()
 
     CHUNK = 1024
@@ -411,8 +401,6 @@ def stream_audio_with_vad(
     CHUNK_SAMPLES: int = int(RATE * chunk_size_ms / 1000)
 
     # Load configuration
-    from .config import CODE_DEFAULTS, load_app_config
-
     config = load_app_config()
 
     # VAD Configuration from config

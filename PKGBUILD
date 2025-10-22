@@ -27,18 +27,20 @@ sha256sums=('f6ef256b98c3690c0c87e7b3f439a2c69c1473d5091fb3f2da039ffe2d461198')
 build() {
     cd "$pkgname-$pkgver"
 
-    # Create virtual environment and install the package using uv
-    # This installs all dependencies and the package itself
-    uv venv .venv
-    uv pip install .
+    # Nothing to do here - we'll create venv during package()
+    # so it has the correct paths from the start
 }
 
 package() {
     cd "$pkgname-$pkgver"
 
-    # Install the virtual environment to /usr/lib/talkat
+    # Create virtual environment at its final location
+    # This ensures all shebangs and paths are correct
     install -dm755 "$pkgdir/usr/lib/$pkgname"
-    cp -r .venv "$pkgdir/usr/lib/$pkgname/"
+    uv venv "$pkgdir/usr/lib/$pkgname/.venv"
+
+    # Install the package into the venv
+    "$pkgdir/usr/lib/$pkgname/.venv/bin/pip" install .
 
     # Create wrapper script in /usr/bin that uses the venv
     install -dm755 "$pkgdir/usr/bin"

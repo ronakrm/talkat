@@ -2,8 +2,10 @@
 include LICENSE
 include README.md
 include talkat.desktop
+include talkat.install
 include CLAUDE.md
 include pyproject.toml
+include PKGBUILD
 
 # Include all Python files in src/
 recursive-include src *.py

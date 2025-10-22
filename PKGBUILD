@@ -39,8 +39,9 @@ package() {
     install -dm755 "$pkgdir/usr/lib/$pkgname"
     uv venv "$pkgdir/usr/lib/$pkgname/.venv"
 
-    # Install the package into the venv
-    "$pkgdir/usr/lib/$pkgname/.venv/bin/pip" install .
+    # Install the package into the venv using uv pip
+    # Use --python to target the specific venv we just created
+    uv pip install --python "$pkgdir/usr/lib/$pkgname/.venv/bin/python" .
 
     # Create wrapper script in /usr/bin that uses the venv
     install -dm755 "$pkgdir/usr/bin"

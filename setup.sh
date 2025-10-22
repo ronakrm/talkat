@@ -31,7 +31,7 @@ if [ "$INSTALL_MODE" = "system" ]; then
         echo "System-wide installation requires root. Please run with sudo."
         exit 1
     fi
-    APP_DIR="/opt/talkat"
+    APP_DIR="/usr/share/talkat"
     BIN_DIR="/usr/local/bin"
     SERVICE_DIR="/etc/systemd/system"
     SERVICE_TYPE="system"
@@ -91,7 +91,29 @@ cp -r ./* "$APP_DIR/"
 # Install dependencies
 echo "Installing Python dependencies..."
 cd "$APP_DIR"
+
+# For system-wide installs, set UV_PYTHON_INSTALL_DIR to a shared location
+if [ "$SERVICE_TYPE" = "system" ]; then
+    export UV_PYTHON_INSTALL_DIR="$APP_DIR/.venv/python"
+    echo "Installing Python to shared location: $UV_PYTHON_INSTALL_DIR"
+
+    # Clean old venv if it exists and points to wrong location (e.g., /root/.local)
+    if [ -L "$APP_DIR/.venv/bin/python" ]; then
+        PYTHON_TARGET=$(readlink "$APP_DIR/.venv/bin/python")
+        if [[ "$PYTHON_TARGET" == /root/* ]]; then
+            echo "Removing old venv with inaccessible Python location..."
+            rm -rf "$APP_DIR/.venv"
+        fi
+    fi
+fi
+
 uv sync
+
+# For system-wide installs, fix ownership so the service user can access the venv
+if [ "$SERVICE_TYPE" = "system" ]; then
+    echo "Setting ownership for user $USER_NAME..."
+    chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
+fi
 
 # Create service file
 echo "Creating $SERVICE_TYPE service..."
@@ -105,6 +127,7 @@ After=network.target
 Type=simple
 User=$USER_NAME
 WorkingDirectory=$APP_DIR
+Environment="UV_PYTHON_INSTALL_DIR=/usr/share/talkat/.venv/python"
 ExecStart=/usr/bin/uv run talkat server
 Restart=always
 RestartSec=3
@@ -187,11 +210,11 @@ echo "Transcripts are saved to: ~/.local/share/talkat/transcripts/"
 # Clean up old installations if requested
 if [ "$INSTALL_MODE" = "user" ] && [ -f "/usr/local/bin/talkat" ]; then
     echo ""
-    echo "Note: System-wide installation detected at /opt/talkat"
+    echo "Note: System-wide installation detected at /usr/share/talkat"
     echo "To remove it, run:"
     echo "  sudo systemctl stop talkat"
     echo "  sudo systemctl disable talkat"
-    echo "  sudo rm -rf /opt/talkat"
+    echo "  sudo rm -rf /usr/share/talkat"
     echo "  sudo rm /usr/local/bin/talkat"
     echo "  sudo rm /etc/systemd/system/talkat.service"
 fi

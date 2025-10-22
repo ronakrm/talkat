@@ -1,0 +1,32 @@
+[Desktop Entry]
+Type=Application
+Name=Talkat
+GenericName=Voice Dictation
+Comment=Voice-to-text dictation system for Wayland
+Exec=talkat listen
+Icon=audio-input-microphone
+Terminal=true
+Categories=AudioVideo;Audio;Utility;Accessibility;
+Keywords=voice;dictation;speech;recognition;transcription;whisper;
+StartupNotify=false
+Actions=Listen;Long;Calibrate;Server;
+
+[Desktop Action Listen]
+Name=Start Recording
+Exec=talkat listen
+Icon=media-record
+
+[Desktop Action Long]
+Name=Long Dictation Mode
+Exec=talkat long
+Icon=media-record
+
+[Desktop Action Calibrate]
+Name=Calibrate Microphone
+Exec=talkat calibrate
+Icon=audio-input-microphone
+
+[Desktop Action Server]
+Name=Start Server
+Exec=talkat server
+Icon=network-server

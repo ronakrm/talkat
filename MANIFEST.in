@@ -1,0 +1,16 @@
+# Include important files in source distribution
+include LICENSE
+include README.md
+include talkat.desktop
+include talkat.install
+include CLAUDE.md
+include pyproject.toml
+include PKGBUILD
+
+# Include all Python files in src/
+recursive-include src *.py
+
+# Exclude unnecessary files
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .DS_Store

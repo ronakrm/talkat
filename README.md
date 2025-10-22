@@ -36,6 +36,46 @@ Contributions, bug reports, and patience are all welcome!
 - flask
 - requests
 
+## Quick Start
+
+Choose your workflow:
+- **Development/Testing**: Use `uv run` for quick iteration without installation
+- **User Installation**: Install to `~/.local/bin` (no sudo required)
+- **System Installation**: Install to `/usr/local/bin` (requires sudo)
+- **AUR Package Testing**: Test the full package build process
+
+### Development and Testing (No Installation)
+
+If you're developing or testing Talkat without installing it:
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/talkat.git
+cd talkat
+
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies
+uv sync
+
+# Start the server in one terminal
+uv run talkat server
+
+# In another terminal, test the client
+uv run talkat listen           # Toggle recording (press once to start, again to stop)
+uv run talkat calibrate        # Calibrate microphone (stay silent!)
+uv run talkat long             # Long dictation mode (Ctrl+C to stop)
+uv run talkat toggle-long      # Toggle background long dictation
+```
+
+**Important**: When testing with `uv run`:
+- The server runs in the foreground, not as a systemd service
+- You need to manually start the server in a separate terminal before using the client
+- Use this for development iteration and testing changes
+
+### Installation (End Users)
+
 ## Installation
 
 1. First, set up ydotool for Wayland input simulation:
@@ -57,30 +97,93 @@ KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
 ```
 
 2. Clone and install Talkat:
+
+#### User Installation (Recommended)
+No sudo required, installs to `~/.local/bin`:
 ```bash
 git clone https://github.com/yourusername/talkat.git
 cd talkat
-
-# Choose installation type:
-sudo ./setup.sh           # System-wide installation (requires sudo)
-./setup.sh --user         # User installation (no sudo required)
+./setup.sh --user
 ```
 
-The setup script will:
-- Install required Python dependencies
-- Set up the model server as a systemd service, and download the `base.en` `faster-whisper` model.
-- Create the `talkat` command-line tool
+Make sure `~/.local/bin` is in your PATH (most distros do this by default).
 
-### Updating/Upgrading
-
-To update talkat with the latest changes from the repository:
+#### System-wide Installation
+Requires sudo, installs to `/usr/local/bin`:
 ```bash
+git clone https://github.com/yourusername/talkat.git
 cd talkat
-git pull
 sudo ./setup.sh
 ```
 
-The setup script automatically handles both fresh installations and updates.
+The setup script will:
+- Install required Python dependencies via `uv`
+- Set up the model server as a systemd service (user service for `--user`, system service for system install)
+- Download the `base.en` faster-whisper model to `~/.cache/talkat/`
+- Create the `talkat` command-line tool
+
+**Important**: After installation, the server runs automatically as a systemd service. You don't need to manually start it.
+
+**Check server status**:
+- User installation: `systemctl --user status talkat`
+- System installation: `systemctl status talkat`
+
+### Updating After Code Changes
+
+If you've made changes to the code and want to update your installation:
+
+```bash
+cd talkat
+
+# For user installation (recommended):
+./setup.sh --user
+
+# For system-wide installation:
+sudo ./setup.sh
+```
+
+The setup script automatically handles both fresh installations and updates. Always run it after pulling changes or modifying code.
+
+### Testing AUR Package Build
+
+If you're testing the AUR package build process (for maintainers or contributors):
+
+```bash
+# Step 1: Build source distribution
+cd talkat
+uv build --sdist  # Creates dist/talkat-*.tar.gz
+
+# Step 2: Prepare PKGBUILD
+cd pkgtest  # Or wherever your test PKGBUILD is
+# Edit PKGBUILD to update pkgver if the version changed
+updpkgsums  # Updates checksums based on the new tarball
+
+# Step 3: Test the package build
+makepkg -f  # Force rebuild, creates talkat-*.pkg.tar.zst
+
+# Step 4: Test installation
+makepkg -si  # Build and install (use -i for install)
+# OR if already built:
+sudo pacman -U talkat-*.pkg.tar.zst
+
+# Step 5: Verify installation
+systemctl --user status talkat  # Check service status
+talkat calibrate                # Test calibration
+talkat listen                   # Test recording
+```
+
+**Important Notes**:
+- AUR packages use systemd **user services** (`systemctl --user`), not system services
+- The service starts automatically on boot (user login)
+- The `talkat` command is installed to `/usr/bin` (via pacman)
+- Models are cached in `~/.cache/talkat/`
+- Configuration is in `~/.config/talkat/`
+
+**To uninstall after testing**:
+```bash
+sudo pacman -R talkat
+systemctl --user stop talkat  # Stop the service first if needed
+```
 
 ## Usage
 
@@ -133,6 +236,10 @@ Run calibration when:
 
 - Check server status:
 ```bash
+# User installation (recommended):
+systemctl --user status talkat
+
+# System installation:
 systemctl status talkat
 ```
 
@@ -207,13 +314,23 @@ Example configuration:
    - Log out and back in after adding yourself to the input group
 
 2. If the model server isn't starting:
-   - Check systemd logs: `journalctl -u talkat` (system-wide) or `journalctl --user -u talkat` (user installation)
+   - Check systemd logs:
+     - User installation: `journalctl --user -u talkat`
+     - System installation: `journalctl -u talkat`
+   - Check status:
+     - User installation: `systemctl --user status talkat`
+     - System installation: `systemctl status talkat`
+   - Restart service:
+     - User installation: `systemctl --user restart talkat`
+     - System installation: `sudo systemctl restart talkat`
    - Verify model files are downloaded in `~/.cache/talkat/`
    - Check configuration file permissions
 
 3. If toggle isn't working:
    - Check if PID file exists: `ls ~/.cache/talkat/listen.pid`
-   - Ensure you're using the latest version: `cd talkat && git pull && ./setup.sh`
+   - Ensure you're using the latest version:
+     - User installation: `cd talkat && git pull && ./setup.sh --user`
+     - System installation: `cd talkat && git pull && sudo ./setup.sh`
    - Try cleaning up stale PID files: `rm ~/.cache/talkat/*.pid`
 
 4. Audio issues:
@@ -222,4 +339,3 @@ Example configuration:
    - If recording triggers on background noise, recalibrate in a quieter environment
    - Check available audio devices: `pactl list sources`
    - Verify PyAudio can access your microphone
-   

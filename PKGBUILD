@@ -44,10 +44,11 @@ package() {
     uv pip install --python "$pkgdir/usr/lib/$pkgname/.venv/bin/python" .
 
     # Create wrapper script in /usr/bin that uses the venv
+    # Use python -m to avoid relying on entry point scripts with hardcoded shebangs
     install -dm755 "$pkgdir/usr/bin"
     cat > "$pkgdir/usr/bin/talkat" << 'EOF'
 #!/bin/bash
-exec /usr/lib/talkat/.venv/bin/talkat "$@"
+exec /usr/lib/talkat/.venv/bin/python -m talkat.cli "$@"
 EOF
     chmod +x "$pkgdir/usr/bin/talkat"
 

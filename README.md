@@ -62,9 +62,11 @@ uv sync
 # Start the server in one terminal
 uv run talkat server
 
-# In another terminal, test the client
+# In another terminal, calibrate first (IMPORTANT!)
+uv run talkat calibrate        # Calibrate microphone (stay silent for 10 seconds!)
+
+# Then test the client
 uv run talkat listen           # Toggle recording (press once to start, again to stop)
-uv run talkat calibrate        # Calibrate microphone (stay silent!)
 uv run talkat long             # Long dictation mode (Ctrl+C to stop)
 uv run talkat toggle-long      # Toggle background long dictation
 ```
@@ -122,7 +124,9 @@ The setup script will:
 - Download the `base.en` faster-whisper model to `~/.cache/talkat/`
 - Create the `talkat` command-line tool
 
-**Important**: After installation, the server runs automatically as a systemd service. You don't need to manually start it.
+**Important**: After installation:
+1. The server runs automatically as a systemd service (you don't need to manually start it)
+2. **You must calibrate your microphone before first use**: `talkat calibrate`
 
 **Check server status**:
 - User installation: `systemctl --user status talkat`
@@ -187,7 +191,30 @@ systemctl --user stop talkat  # Stop the service first if needed
 
 ## Usage
 
-The model server runs automatically in the background after installation. You can use the following commands:
+The model server runs automatically in the background after installation.
+
+### First Time Setup: Calibration (Required)
+
+**Before using Talkat for the first time, you must calibrate your microphone:**
+
+```bash
+talkat calibrate
+```
+
+**What this does:**
+- Measures your ambient noise levels for 10 seconds
+- Calculates an optimal silence threshold for voice activity detection
+- Saves the threshold to `~/.config/talkat/config.json`
+
+**Why it's critical:**
+- Without calibration, Talkat may not detect your voice properly
+- The default threshold may be too high or too low for your environment
+- Different microphones and rooms need different thresholds
+
+**When to recalibrate:**
+- When switching to a different microphone
+- When changing to a different room or environment
+- If voice detection stops working reliably
 
 ### Short Dictation Mode (with Toggle)
 Start or stop listening for voice commands:

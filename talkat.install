@@ -1,10 +1,20 @@
 post_install() {
     echo "==> Talkat has been installed."
-    echo "==> To enable and start the service for your user, run:"
+    echo ""
+    echo "==> IMPORTANT: Calibrate your microphone before first use:"
+    echo "    talkat calibrate"
+    echo ""
+    echo "==> This sets the optimal silence threshold for your environment."
+    echo "==> Without calibration, voice detection may not work properly."
+    echo ""
+    echo "==> After calibration, enable and start the service:"
     echo "    systemctl --user enable --now talkat"
     echo ""
     echo "==> Or to start just this once:"
     echo "    systemctl --user start talkat"
+    echo ""
+    echo "==> Then test voice dictation:"
+    echo "    talkat listen"
 }
 
 post_upgrade() {

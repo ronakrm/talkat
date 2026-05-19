@@ -16,178 +16,112 @@ Contributions, bug reports, and patience are all welcome!
 ## System Requirements
 
 - Linux with Wayland compositor (Sway, Niri, etc.)
-- Python 3.12 or higher
+- Python 3.11 or higher
 - Audio input device (microphone)
-- Root access for server setup
 
 ## Dependencies
 
 ### System Dependencies
 - `ydotool` and `ydotoold` for Wayland input simulation
-- `notify-send` for notifications (optional)
 - `uv` for Python package management
+- `notify-send` (libnotify) for desktop notifications (optional)
 - `wl-copy` (wl-clipboard) or `xclip` for clipboard support (optional)
 
-### Python Dependencies
-- faster-whisper
-- numpy
-- pyaudio
-- vosk
-- flask
-- requests
-
-## Quick Start
-
-Choose your workflow:
-- **Development/Testing**: Use `uv run` for quick iteration without installation
-- **User Installation**: Install to `~/.local/bin` (no sudo required)
-- **System Installation**: Install to `/usr/local/bin` (requires sudo)
-- **AUR Package Testing**: Test the full package build process
-
-### Development and Testing (No Installation)
-
-If you're developing or testing Talkat without installing it:
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/talkat.git
-cd talkat
-
-# Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install dependencies
-uv sync
-
-# Start the server in one terminal
-uv run talkat server
-
-# In another terminal, calibrate first (IMPORTANT!)
-uv run talkat calibrate        # Calibrate microphone (stay silent for 10 seconds!)
-
-# Then test the client
-uv run talkat listen           # Toggle recording (press once to start, again to stop)
-uv run talkat long             # Long dictation mode (Ctrl+C to stop)
-uv run talkat toggle-long      # Toggle background long dictation
-```
-
-**Important**: When testing with `uv run`:
-- The server runs in the foreground, not as a systemd service
-- You need to manually start the server in a separate terminal before using the client
-- Use this for development iteration and testing changes
-
-### Installation (End Users)
+### Python Dependencies (installed automatically into an isolated venv)
+- `faster-whisper` (CTranslate2-backed, no torch required)
+- `vosk`
+- `numpy`
+- `pyaudio`
+- `flask` + `waitress` (model server, unix-socket-only)
+- `httpx` (client; unix-socket transport)
+- `librosa` + `soundfile` (audio file ingestion)
 
 ## Installation
 
-1. First, set up ydotool for Wayland input simulation:
+Two supported paths. Talkat is a per-user tool — the model server always
+runs as your user via `systemctl --user`, regardless of how the CLI is
+installed.
+
+### Path 1: Local install from a git checkout
+
+```bash
+git clone https://github.com/ronakrm/talkat.git
+cd talkat
+./setup.sh
+```
+
+What this does:
+- `uv tool install --reinstall .` — installs the `talkat` CLI into an isolated
+  venv at `~/.local/share/uv/tools/talkat/` and drops a wrapper at
+  `~/.local/bin/talkat`
+- `talkat install-service` — writes `~/.config/systemd/user/talkat.service`
+  pointing at that interpreter, then `daemon-reload`/`enable`/`start`s it
+
+To update after pulling: just re-run `./setup.sh`.
+
+To uninstall:
+```bash
+talkat uninstall-service
+uv tool uninstall talkat
+```
+
+### Path 2: AUR package (Arch Linux)
+
+A `PKGBUILD` is included for building the Arch package locally. After
+building/installing the package:
+
+```bash
+makepkg -si        # builds + installs to /usr/lib/talkat with /usr/bin/talkat
+systemctl --user enable --now talkat
+```
+
+The package ships its own `/usr/lib/systemd/user/talkat.service`, so do
+*not* run `talkat install-service` on top — just enable the unit directly.
+
+To uninstall: `sudo pacman -R talkat`.
+
+### One-time system setup for ydotool
+
+Regardless of install path you need ydotool wired up:
+
 ```bash
 # Add your user to the input group
 sudo usermod -aG input $USER
 
-# Create udev rules for uinput access
-echo '## Give ydotoold access to the uinput device
-## Solution by https://github.com/ReimuNotMoe/ydotool/issues/25#issuecomment-535842993
-KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
-' | sudo tee /etc/udev/rules.d/80-uinput.rules > /dev/null
+# udev rule for uinput access
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
+    | sudo tee /etc/udev/rules.d/80-uinput.rules > /dev/null
 
-# Add ydotoold to your Wayland compositor startup
-# For Sway, add to your config:
-# exec --no-startup-id ydotoold
-# For Niri, add to your config:
-# spawn-at-startup "ydotoold"
+# Start ydotoold from your compositor:
+# - Sway:  exec --no-startup-id ydotoold
+# - Niri:  spawn-at-startup "ydotoold"
 ```
 
-2. Clone and install Talkat:
+Log out + back in after changing groups.
 
-#### User Installation (Recommended)
-No sudo required, installs to `~/.local/bin`:
-```bash
-git clone https://github.com/yourusername/talkat.git
-cd talkat
-./setup.sh --user
-```
+### After install
 
-Make sure `~/.local/bin` is in your PATH (most distros do this by default).
+1. Verify the service is up: `systemctl --user status talkat`
+2. **Calibrate your microphone** (required for VAD to work):
+   `talkat calibrate` (stay silent for 10 seconds)
+3. Try `talkat listen` — focus a text editor and speak.
 
-#### System-wide Installation
-Requires sudo, installs to `/usr/local/bin`:
-```bash
-git clone https://github.com/yourusername/talkat.git
-cd talkat
-sudo ./setup.sh
-```
+### Development without installing
 
-The setup script will:
-- Install required Python dependencies via `uv`
-- Set up the model server as a systemd service (user service for `--user`, system service for system install)
-- Download the `base.en` faster-whisper model to `~/.cache/talkat/`
-- Create the `talkat` command-line tool
-
-**Important**: After installation:
-1. The server runs automatically as a systemd service (you don't need to manually start it)
-2. **You must calibrate your microphone before first use**: `talkat calibrate`
-
-**Check server status**:
-- User installation: `systemctl --user status talkat`
-- System installation: `systemctl status talkat`
-
-### Updating After Code Changes
-
-If you've made changes to the code and want to update your installation:
+For iterating on the code without going through `setup.sh`:
 
 ```bash
-cd talkat
+uv sync                # set up the project venv
+uv run talkat server   # foreground model server (Ctrl+C to stop)
 
-# For user installation (recommended):
-./setup.sh --user
-
-# For system-wide installation:
-sudo ./setup.sh
+# in another terminal:
+uv run talkat calibrate
+uv run talkat listen
+uv run talkat long
 ```
 
-The setup script automatically handles both fresh installations and updates. Always run it after pulling changes or modifying code.
-
-### Testing AUR Package Build
-
-If you're testing the AUR package build process (for maintainers or contributors):
-
-```bash
-# Step 1: Build source distribution
-cd talkat
-uv build --sdist  # Creates dist/talkat-*.tar.gz
-
-# Step 2: Prepare PKGBUILD
-cd pkgtest  # Or wherever your test PKGBUILD is
-# Edit PKGBUILD to update pkgver if the version changed
-updpkgsums  # Updates checksums based on the new tarball
-
-# Step 3: Test the package build
-makepkg -f  # Force rebuild, creates talkat-*.pkg.tar.zst
-
-# Step 4: Test installation
-makepkg -si  # Build and install (use -i for install)
-# OR if already built:
-sudo pacman -U talkat-*.pkg.tar.zst
-
-# Step 5: Verify installation
-systemctl --user status talkat  # Check service status
-talkat calibrate                # Test calibration
-talkat listen                   # Test recording
-```
-
-**Important Notes**:
-- AUR packages use systemd **user services** (`systemctl --user`), not system services
-- The service starts automatically on boot (user login)
-- The `talkat` command is installed to `/usr/bin` (via pacman)
-- Models are cached in `~/.cache/talkat/`
-- Configuration is in `~/.config/talkat/`
-
-**To uninstall after testing**:
-```bash
-sudo pacman -R talkat
-systemctl --user stop talkat  # Stop the service first if needed
-```
+This bypasses the systemd unit entirely — useful when you're editing code
+and want fast feedback without restarting a service.
 
 ## Usage
 
@@ -235,10 +169,11 @@ talkat long --no-clipboard   # Saves to file only
 ```
 
 Long dictation mode:
-- Continues recording until you press Ctrl+C
-- Saves transcript to `~/.local/share/talkat/transcripts/`
-- Automatically copies full transcript to clipboard when stopped (unless --no-clipboard is used)
-- No timeout - perfect for long-form dictation, note-taking, or transcription
+- Saves transcript to `~/.local/share/talkat/transcripts/` incrementally as utterances are recognized
+- Automatically copies the full transcript to clipboard on exit (unless `--no-clipboard`)
+- **Auto-stops** after `long_mode_silence_timeout` seconds of continuous silence (default 60s) so it cleans up by itself if you walk away
+- Hard cap on a single session: `long_mode_max_session_duration` (default 30 minutes)
+- You can still stop manually with Ctrl+C (foreground) or `talkat toggle-long` (background)
 
 ### Background Long Dictation
 Manage long dictation as a background process:
@@ -263,11 +198,7 @@ Run calibration when:
 
 - Check server status:
 ```bash
-# User installation (recommended):
 systemctl --user status talkat
-
-# System installation:
-systemctl status talkat
 ```
 
 ### Create Shortcuts
@@ -303,12 +234,19 @@ Example configuration:
 {
     "silence_threshold": 100.0,
     "model_type": "faster-whisper",
-    "model_name": "large.v3",
+    "model_name": "small.en",
     "save_transcripts": true,
     "clipboard_on_long": true,
+    "long_mode_silence_timeout": 60.0,
+    "long_mode_max_session_duration": 1800.0,
     "transcript_dir": "~/.local/share/talkat/transcripts"
 }
 ```
+
+The model server listens on a unix socket at
+`$XDG_RUNTIME_DIR/talkat/server.sock` (permissions `0600`) — local-only by
+design, no network port to manage. Override with `server_socket` if you
+need to.
 
 ### Transcript Features
 - All transcripts (both short and long mode) are saved to `~/.local/share/talkat/transcripts/`
@@ -341,24 +279,17 @@ Example configuration:
    - Log out and back in after adding yourself to the input group
 
 2. If the model server isn't starting:
-   - Check systemd logs:
-     - User installation: `journalctl --user -u talkat`
-     - System installation: `journalctl -u talkat`
-   - Check status:
-     - User installation: `systemctl --user status talkat`
-     - System installation: `systemctl status talkat`
-   - Restart service:
-     - User installation: `systemctl --user restart talkat`
-     - System installation: `sudo systemctl restart talkat`
+   - Check status: `systemctl --user status talkat`
+   - Check logs: `journalctl --user -u talkat -f`
+   - Restart: `systemctl --user restart talkat`
+   - Probe the socket: `curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/server.sock" http://talkat/health`
    - Verify model files are downloaded in `~/.cache/talkat/`
-   - Check configuration file permissions
 
 3. If toggle isn't working:
-   - Check if PID file exists: `ls ~/.cache/talkat/listen.pid`
-   - Ensure you're using the latest version:
-     - User installation: `cd talkat && git pull && ./setup.sh --user`
-     - System installation: `cd talkat && git pull && sudo ./setup.sh`
-   - Try cleaning up stale PID files: `rm ~/.cache/talkat/*.pid`
+   - PID/lock files live at `${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/` (typically `/run/user/$UID/talkat/`)
+   - Check: `ls "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/listen.pid"`
+   - Clean stale PIDs: `rm "${XDG_RUNTIME_DIR:-/run/user/$UID}"/talkat/*.pid`
+   - Update: `cd talkat && git pull && ./setup.sh`
 
 4. Audio issues:
    - Run calibration: `talkat calibrate` (remember to stay SILENT during calibration)

@@ -18,9 +18,9 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
        │                                   │
    Audio Input                      Speech Models
    (pyaudio)                    (Faster-Whisper/Vosk)
-       │                                   
-   VAD + Stream                            
-   (record.py)                             
+       │
+   VAD + Stream
+   (record.py)
        │
    Text Output
    (ydotool)
@@ -62,7 +62,7 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - JSON config at `~/.config/talkat/config.json`
    - Model cache at `~/.cache/talkat/`
    - Transcripts at `~/.local/share/talkat/transcripts/`
-   - PID files at `~/.cache/talkat/*.pid`
+   - PID and lock files at `$XDG_RUNTIME_DIR/talkat/` (typically `/run/user/$UID/talkat/`), with a fallback to `~/.cache/talkat/runtime/` when `XDG_RUNTIME_DIR` is unavailable
 
 ## Development Workflow
 
@@ -355,7 +355,7 @@ Since no automated tests exist, these need manual verification:
 
 #### Major Hacks/Workarounds
 1. **PID file management** - Basic file-based approach, should use proper IPC
-2. **Signal handling** - Interrupt handling is fragile  
+2. **Signal handling** - Interrupt handling is fragile
 3. **Audio stream cleanup** - Not always properly cleaned up on errors
 4. **Hardcoded timeouts** - Many timeouts should be configurable
 5. **ALSA warnings** - Suppressed rather than properly handled
@@ -385,8 +385,8 @@ Since no automated tests exist, these need manual verification:
    - Test: `ydotool type "test"`
 
 4. **"Toggle not working"**
-   - Check PID file: `ls ~/.cache/talkat/listen.pid`
-   - Clean up stale PIDs: `rm ~/.cache/talkat/*.pid`
+   - Check PID file: `ls "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/listen.pid"`
+   - Clean up stale PIDs: `rm "${XDG_RUNTIME_DIR:-/run/user/$UID}"/talkat/*.pid`
    - Update installation: `./setup.sh --user` or `sudo ./setup.sh`
 
 ### Debug Mode

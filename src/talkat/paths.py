@@ -15,10 +15,10 @@ XDG_CACHE_HOME = get_xdg_dir("XDG_CACHE_HOME", "~/.cache")
 XDG_DATA_HOME = get_xdg_dir("XDG_DATA_HOME", "~/.local/share")
 XDG_RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
 
-# Ensure runtime dir exists and fallback if not
+# Fall back to a cache subdir if XDG_RUNTIME_DIR doesn't exist on this system.
+# Directory creation happens lazily in ensure_user_directories() — not at import time.
 if not XDG_RUNTIME_DIR.exists():
     XDG_RUNTIME_DIR = XDG_CACHE_HOME / "talkat" / "runtime"
-    XDG_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 # Application-specific directories
 APP_NAME = "talkat"

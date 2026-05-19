@@ -27,7 +27,7 @@ done
 
 # Check if running with proper privileges based on mode
 if [ "$INSTALL_MODE" = "system" ]; then
-    if [ "$EUID" -ne 0 ]; then 
+    if [ "$EUID" -ne 0 ]; then
         echo "System-wide installation requires root. Please run with sudo."
         exit 1
     fi
@@ -42,11 +42,11 @@ else
     SERVICE_DIR="$HOME/.config/systemd/user"
     SERVICE_TYPE="user"
     USER_NAME="$USER"
-    
+
     # Create user directories if they don't exist
     mkdir -p "$BIN_DIR"
     mkdir -p "$SERVICE_DIR"
-    
+
     # Ensure ~/.local/bin is in PATH
     if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
         echo "Warning: $BIN_DIR is not in your PATH."
@@ -85,8 +85,27 @@ fi
 echo "Installing to $APP_DIR..."
 mkdir -p "$APP_DIR"
 
-# Copy all files
-cp -r ./* "$APP_DIR/"
+# Copy source files, excluding build artifacts, venvs, caches, and user data.
+# Uses rsync to honor an exclude list; falls back to cp -r ./* (which already
+# skips dotfiles via the shell glob) when rsync is unavailable.
+if command -v rsync &> /dev/null; then
+    rsync -a --delete \
+        --exclude='.git/' \
+        --exclude='.venv/' \
+        --exclude='__pycache__/' \
+        --exclude='build/' \
+        --exclude='dist/' \
+        --exclude='data/' \
+        --exclude='.mypy_cache/' \
+        --exclude='.pytest_cache/' \
+        --exclude='.ruff_cache/' \
+        --exclude='*.egg-info/' \
+        --exclude='.claude/' \
+        ./ "$APP_DIR/"
+else
+    echo "Warning: rsync not found; falling back to cp. Build artifacts under build/, dist/, and data/ may be copied."
+    cp -r ./* "$APP_DIR/"
+fi
 
 # Install dependencies
 echo "Installing Python dependencies..."

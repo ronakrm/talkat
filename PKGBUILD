@@ -7,7 +7,7 @@ arch=('any')
 url="https://github.com/ronakrm/talkat"
 license=('MIT')
 depends=(
-    'uv'           # Python package manager (handles all Python dependencies)
+    'python'       # Interpreter the bundled venv symlinks to (>=3.11)
     'portaudio'    # Audio I/O library
     'ydotool'      # Wayland input automation
 )
@@ -19,10 +19,11 @@ optdepends=(
 options=('!strip')  # Disable stripping for faster builds (contains large venv)
 makedepends=(
     'git'
+    'uv'           # Build-time only — used to create the venv and install deps
 )
 install=talkat.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('f6ef256b98c3690c0c87e7b3f439a2c69c1473d5091fb3f2da039ffe2d461198')
+sha256sums=('8e831826e403c2a46b6e4c65bd299f91b0140a5a6047f96eb4708ddb5a962f48')
 
 build() {
     cd "$pkgname-$pkgver"

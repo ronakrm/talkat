@@ -18,9 +18,9 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
        │                                   │
    Audio Input                      Speech Models
    (pyaudio)                    (Faster-Whisper/Vosk)
-       │                                   
-   VAD + Stream                            
-   (record.py)                             
+       │
+   VAD + Stream
+   (record.py)
        │
    Text Output
    (ydotool)
@@ -32,9 +32,10 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
 ### Core Components
 
 1. **Model Server** (`model_server.py`)
-   - Flask HTTP server on port 5555
+   - Flask app served by `waitress` over a unix domain socket at
+     `$XDG_RUNTIME_DIR/talkat/server.sock` (perms 0600)
    - Loads and manages speech recognition models
-   - Provides batch and streaming transcription endpoints
+   - Provides streaming + file transcription endpoints
    - Supports Faster-Whisper (default) and Vosk models
 
 2. **Client** (`main.py`)
@@ -62,7 +63,7 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - JSON config at `~/.config/talkat/config.json`
    - Model cache at `~/.cache/talkat/`
    - Transcripts at `~/.local/share/talkat/transcripts/`
-   - PID files at `~/.cache/talkat/*.pid`
+   - PID and lock files at `$XDG_RUNTIME_DIR/talkat/` (typically `/run/user/$UID/talkat/`), with a fallback to `~/.cache/talkat/runtime/` when `XDG_RUNTIME_DIR` is unavailable
 
 ## Development Workflow
 
@@ -106,21 +107,33 @@ uv run talkat stop-long
 uv run talkat toggle-long
 ```
 
-### Installation Modes
+### Installation
 
-#### System-wide Installation (requires sudo)
+Talkat is a per-user dictation tool. Two supported install paths:
+
+#### Local install from a git checkout
 ```bash
-sudo ./setup.sh
-# or explicitly:
-sudo ./setup.sh --system
+./setup.sh
+```
+Runs `uv tool install --reinstall .` (creates an isolated venv under
+`~/.local/share/uv/tools/talkat/`) and then `talkat install-service` to write
+`~/.config/systemd/user/talkat.service` pointing at that venv's interpreter.
+
+To uninstall:
+```bash
+talkat uninstall-service
+uv tool uninstall talkat
 ```
 
-#### User Installation (no sudo required)
+#### Packaged install (Arch / AUR)
+Build the package from `PKGBUILD`. It installs to `/usr/lib/talkat/` and
+ships `/usr/lib/systemd/user/talkat.service`. Enable with:
 ```bash
-./setup.sh --user
+systemctl --user enable --now talkat
 ```
 
-**Note**: After making changes to the code, always run `./setup.sh` (with appropriate mode) to update the installed version.
+**After code changes**, re-run `./setup.sh` (for the local path) or rebuild
+the package — both will restart the running service.
 
 ## Code Patterns and Conventions
 
@@ -335,12 +348,8 @@ Since no automated tests exist, these need manual verification:
 - `numpy>=2.2.6` - Array operations
 - `flask>=2.0` - HTTP server
 - `requests>=2.20` - HTTP client
-- `transformers>=4.36.0` - For Distil-Whisper models
-- `torch` - CPU-only version by default (see CPU_OPTIMIZATION.md)
 - `librosa>=0.10.1` - Audio file processing
 - `soundfile>=0.12.1` - Audio file I/O
-
-**Note**: PyTorch is installed as CPU-only by default to reduce size and improve compatibility. GPU users can override this if needed.
 
 ### System Requirements
 - `ydotool` - Wayland input automation
@@ -355,7 +364,7 @@ Since no automated tests exist, these need manual verification:
 
 #### Major Hacks/Workarounds
 1. **PID file management** - Basic file-based approach, should use proper IPC
-2. **Signal handling** - Interrupt handling is fragile  
+2. **Signal handling** - Interrupt handling is fragile
 3. **Audio stream cleanup** - Not always properly cleaned up on errors
 4. **Hardcoded timeouts** - Many timeouts should be configurable
 5. **ALSA warnings** - Suppressed rather than properly handled
@@ -370,9 +379,10 @@ Since no automated tests exist, these need manual verification:
 ### Common Issues
 
 1. **"Server not responding"**
-   - Check: `systemctl status talkat` (system) or `systemctl --user status talkat` (user)
-   - Check: `lsof -i :5555`
-   - Try: `systemctl restart talkat` (system) or `systemctl --user restart talkat` (user)
+   - Check: `systemctl --user status talkat`
+   - Check socket: `ls -la "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/server.sock"`
+   - Probe: `curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/server.sock" http://talkat/health`
+   - Try: `systemctl --user restart talkat`
 
 2. **"No audio input"**
    - Check: `pactl list sources`
@@ -385,8 +395,8 @@ Since no automated tests exist, these need manual verification:
    - Test: `ydotool type "test"`
 
 4. **"Toggle not working"**
-   - Check PID file: `ls ~/.cache/talkat/listen.pid`
-   - Clean up stale PIDs: `rm ~/.cache/talkat/*.pid`
+   - Check PID file: `ls "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/listen.pid"`
+   - Clean up stale PIDs: `rm "${XDG_RUNTIME_DIR:-/run/user/$UID}"/talkat/*.pid`
    - Update installation: `./setup.sh --user` or `sudo ./setup.sh`
 
 ### Debug Mode

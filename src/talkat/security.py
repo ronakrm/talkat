@@ -214,12 +214,6 @@ def sanitize_text_for_typing(text: str, max_length: int = 10000) -> str:
     # Remove control characters except newline and tab
     text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
 
-    # Escape special characters that might be interpreted by ydotool
-    # This is conservative - ydotool should handle these properly
-    special_chars = ["\\", '"', "'", "$", "`"]
-    for char in special_chars:
-        text = text.replace(char, f"\\{char}")
-
     return text
 
 
@@ -260,7 +254,7 @@ def validate_audio_params(
 
 def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
     """
-    Validate configuration dictionary for security.
+    Validate configuration dictionary.
 
     Args:
         config: Configuration dictionary
@@ -270,28 +264,43 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
 
     Raises:
         ValueError: If configuration is invalid
+        SecurityError: If a path is unsafe
     """
-    # Validate specific config keys
     if "model_name" in config:
         config["model_name"] = validate_model_name(config["model_name"])
 
-    if "transcript_dir" in config:
-        # Don't require existence for transcript dir as it will be created
-        config["transcript_dir"] = str(
-            validate_file_path(config["transcript_dir"], must_exist=False)
-        )
+    path_keys = [
+        "transcript_dir",
+        "model_cache_dir",
+        "faster_whisper_model_cache_dir",
+        "vosk_model_base_dir",
+        "dictionary_file",
+        "server_socket",
+    ]
+    for key in path_keys:
+        if key in config:
+            config[key] = str(validate_file_path(config[key], must_exist=False))
 
-    if "model_cache_dir" in config:
-        config["model_cache_dir"] = str(
-            validate_file_path(config["model_cache_dir"], must_exist=False)
-        )
-
-    # Validate numeric parameters
-    numeric_params = {
+    numeric_params: dict[str, tuple[float, float]] = {
         "silence_threshold": (0, 10000),
+        "silence_threshold_fallback": (0, 10000),
+        "silence_threshold_min": (0, 10000),
+        "silence_threshold_max": (0, 10000),
+        "silence_duration": (0, 60),
+        "pre_speech_padding": (0, 10),
+        "max_recording_duration": (0, 3600),
+        "long_mode_silence_timeout": (5, 3600),
+        "long_mode_max_session_duration": (60, 86400),
         "fw_device_index": (0, 100),
+        "http_timeout": (0, 3600),
+        "health_check_timeout": (0, 60),
+        "file_processing_timeout_base": (0, 3600),
+        "process_stop_timeout": (0, 300),
+        "lock_acquire_timeout": (0, 300),
+        "lock_retry_interval": (0, 10),
+        "process_check_interval": (0, 10),
+        "background_process_delay": (0, 60),
     }
-
     for param, (min_val, max_val) in numeric_params.items():
         if param in config:
             try:
@@ -301,30 +310,43 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
             except (ValueError, TypeError) as e:
                 raise ValueError(f"Invalid {param}: {config[param]}") from e
 
-    # Validate boolean parameters
     bool_params = ["clipboard_on_long", "save_transcripts"]
     for param in bool_params:
         if param in config and not isinstance(config[param], bool):
             raise ValueError(f"{param} must be boolean, got {type(config[param])}")
 
-    # Validate string choice parameters
     choice_params = {
-        "model_type": ["faster-whisper", "distil-whisper", "vosk"],
+        "model_type": ["faster-whisper", "vosk"],
         "fw_device": ["cpu", "cuda", "auto"],
         "fw_compute_type": ["int8", "float16", "float32"],
         "device": ["cpu", "cuda", "auto"],
     }
-
     for param, choices in choice_params.items():
         if param in config and config[param] not in choices:
             raise ValueError(f"{param} must be one of {choices}, got {config[param]}")
 
+    # Bounded free-form strings — guard against accidental DoS via huge values.
+    string_max_len: dict[str, int] = {}
+    for param, maxlen in string_max_len.items():
+        if param in config:
+            if not isinstance(config[param], str):
+                raise ValueError(f"{param} must be a string, got {type(config[param])}")
+            if len(config[param]) > maxlen:
+                raise ValueError(f"{param} too long: {len(config[param])} > {maxlen}")
+
     return config
+
+
+_UNSET = object()
 
 
 def safe_subprocess_run(command: list[str], **kwargs) -> Any:
     """
     Safely run a subprocess command with validation.
+
+    Defaults to a 30s timeout when none is provided. Pass ``timeout=None``
+    explicitly to disable the timeout for known-long operations (e.g.
+    ``ydotool type`` of a long transcript with a key delay).
 
     Args:
         command: Command to run
@@ -338,17 +360,18 @@ def safe_subprocess_run(command: list[str], **kwargs) -> Any:
     """
     import subprocess
 
-    # Validate command
     command = validate_command(command)
 
-    # Set safe defaults
-    safe_kwargs = {
+    timeout = kwargs.get("timeout", _UNSET)
+    if timeout is _UNSET:
+        timeout = 30
+
+    safe_kwargs: dict[str, Any] = {
         "shell": False,  # Never use shell=True
-        "timeout": kwargs.get("timeout", 30),  # Default 30 second timeout
+        "timeout": timeout,
         "check": kwargs.get("check", False),
     }
 
-    # Only allow specific kwargs
     allowed_kwargs = [
         "input",
         "capture_output",

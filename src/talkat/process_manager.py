@@ -239,30 +239,27 @@ class ProcessManager:
         Returns:
             PID of started process or None on failure
         """
-        try:
-            # Determine where to redirect output
-            from typing import IO
+        from typing import IO
 
+        log_handle: IO[str] | None = None
+        try:
             if debug:
-                # Ensure log directory exists
                 LOG_DIR.mkdir(parents=True, exist_ok=True)
                 log_file = LOG_DIR / f"{self.process_name}_debug.log"
                 logger.info(f"Debug mode: output will be written to {log_file}")
-                log_handle: IO[str] = open(log_file, "a")
+                log_handle = open(log_file, "a")
                 stdout: int | IO[str] = log_handle
                 stderr: int | IO[str] = log_handle
             else:
                 stdout = subprocess.DEVNULL
                 stderr = subprocess.DEVNULL
 
-            # Start process in new session to prevent signal propagation
             process = subprocess.Popen(
                 cmd,
                 stdout=stdout,
                 stderr=stderr,
                 env=env,
                 start_new_session=True,
-                # Properly handle signals
                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
             )
 
@@ -274,6 +271,11 @@ class ProcessManager:
         except Exception as e:
             logger.error(f"Failed to start process: {e}")
             return None
+        finally:
+            # Popen dup'd the fd into the child; the parent's handle is no
+            # longer needed and would otherwise leak.
+            if log_handle is not None:
+                log_handle.close()
 
     def toggle(self) -> tuple[bool, str]:
         """
@@ -302,8 +304,12 @@ class ProcessManager:
             self.release_lock()
 
     def __enter__(self):
-        """Context manager entry."""
-        self.acquire_lock()
+        """Context manager entry — raises if the lock cannot be acquired."""
+        if not self.acquire_lock():
+            raise RuntimeError(
+                f"Could not acquire lock for {self.process_name} "
+                f"(another talkat command may be in progress)"
+            )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

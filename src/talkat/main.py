@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 
-import argparse
 import contextlib
 import json
 import os
+import signal
 import subprocess
-import sys
+import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import requests  # Added for HTTP calls
+import httpx
 
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
 from .logging_config import get_logger
 from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager
-from .record import calibrate_microphone, stream_audio_with_vad
+from .record import AudioSession, AudioSessionError, calibrate_microphone
 from .security import (
     safe_subprocess_run,
     sanitize_text_for_clipboard,
@@ -25,6 +26,14 @@ from .security import (
 )
 
 logger = get_logger(__name__)
+
+
+class TranscriptionUnreachable(RuntimeError):
+    """Server unreachable — connection refused, DNS failure, or request timeout."""
+
+
+class TranscriptionServerError(RuntimeError):
+    """Server returned an error (non-2xx, malformed JSON, etc.)."""
 
 
 def get_transcript_dir() -> Path:
@@ -49,18 +58,15 @@ def save_transcript(text: str, mode: str = "short") -> Path:
 
 
 def copy_to_clipboard(text: str) -> bool:
-    """Copy text to clipboard using wl-copy or xclip."""
-    # Sanitize text before copying
+    """Copy text to clipboard using wl-copy (Wayland) or xclip (X11)."""
     text = sanitize_text_for_clipboard(text)
 
-    # Try wl-copy first (Wayland)
     try:
         safe_subprocess_run(["wl-copy"], input=text.encode("utf-8"), check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
-    # Try xclip as fallback (X11)
     try:
         safe_subprocess_run(
             ["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True
@@ -72,743 +78,332 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def postprocess_transcript(
-    transcript_path: Path, processor_command: str | None = None
-) -> str | None:
+def _notify(message: str) -> None:
+    """Send a desktop notification, ignoring failure (notify-send may be missing)."""
+    with contextlib.suppress(FileNotFoundError):
+        safe_subprocess_run(["notify-send", "Talkat", message], check=False)
+
+
+def _log_threshold_source(threshold: float) -> None:
+    """Emit a one-line info log about where the threshold came from."""
+    if threshold == CODE_DEFAULTS["silence_threshold"]:
+        logger.info(f"No calibrated threshold found in config. Using default: {threshold:.1f}")
+        logger.info("Run 'talkat calibrate' to set a custom threshold.")
+    else:
+        logger.info(f"Using threshold: {threshold:.1f} (from config)")
+
+
+class TranscriptionClient:
+    """Records a single utterance from the microphone and POSTs it to the model server."""
+
+    def __init__(self, config: dict[str, Any]):
+        self.config = config
+        self.socket_path: str = config.get("server_socket", CODE_DEFAULTS["server_socket"])
+        self.http_timeout: int = int(config.get("http_timeout", CODE_DEFAULTS["http_timeout"]))
+        self.threshold: float = float(
+            config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"])
+        )
+        self.silence_duration: float = float(
+            config.get("silence_duration", CODE_DEFAULTS["silence_duration"])
+        )
+        transport = httpx.HTTPTransport(uds=self.socket_path)
+        self._client = httpx.Client(transport=transport, timeout=self.http_timeout)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> "TranscriptionClient":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def transcribe_one_utterance(
+        self,
+        stop_event: threading.Event | None = None,
+        max_duration: float | None = None,
+        debug: bool = False,
+    ) -> str:
+        """
+        Record one utterance and return its transcription.
+
+        Returns the transcribed text (possibly empty if no speech detected).
+        Raises ``AudioSessionError`` on microphone failure, ``TranscriptionUnreachable``
+        if the server is unreachable, and ``TranscriptionServerError`` for other
+        server-side problems.
+        """
+        with AudioSession(
+            threshold=self.threshold,
+            silence_duration=self.silence_duration,
+            max_duration=max_duration,
+            stop_event=stop_event,
+            debug=debug,
+        ) as session:
+            metadata = {"rate": session.sample_rate}
+
+            def body():
+                yield json.dumps(metadata).encode("utf-8") + b"\n"
+                for chunk in session:
+                    if chunk:
+                        yield chunk
+
+            # The host part of the URL is ignored when using a unix-socket transport;
+            # only the path matters. We use a placeholder host purely for httpx hygiene.
+            try:
+                response = self._client.post("http://talkat/transcribe_stream", content=body())
+                response.raise_for_status()
+            except httpx.ConnectError as e:
+                raise TranscriptionUnreachable(
+                    f"Could not connect to the model server at {self.socket_path}. "
+                    "Ensure it's running: systemctl --user status talkat"
+                ) from e
+            except httpx.TimeoutException as e:
+                raise TranscriptionUnreachable(f"Request to model server timed out: {e}") from e
+            except httpx.HTTPError as e:
+                raise TranscriptionServerError(f"Error communicating with model server: {e}") from e
+
+            try:
+                return str(response.json().get("text", "")).strip()
+            except json.JSONDecodeError as e:
+                raise TranscriptionServerError(
+                    f"Could not decode JSON response from server: {response.text}"
+                ) from e
+
+
+def _set_stop_event_on_signal(stop_event: threading.Event) -> None:
     """
-    Postprocess a transcript file using an external command or LLM interface.
+    Install signal handlers that only set an Event.
 
-    This is a placeholder for future functionality. The idea is to:
-    1. Read the transcript file
-    2. Pass it to a processor command (e.g., an LLM CLI tool)
-    3. Return the processed output
-
-    Example processor commands could be:
-    - "llm prompt 'Clean up this transcript and format it as bullet points'"
-    - "gpt-cli --system 'You are a helpful assistant' --prompt 'Summarize this text'"
-    - Custom scripts that interface with local or remote LLMs
-
-    The processor command should accept text via stdin and output to stdout.
-
-    Future config options could include:
-    - postprocess_enabled: bool
-    - postprocess_command: str (the command to run)
-    - postprocess_auto: bool (automatically process after dictation)
-    - postprocess_prompts: dict (predefined prompts for different use cases)
+    The handler does NO logging or cleanup — Python's logging module isn't
+    async-signal-safe and can deadlock if invoked from a handler. The main
+    loop observes the event and runs logging/cleanup itself.
     """
-    if not processor_command:
-        return None
 
-    # Read the transcript
-    try:
-        with open(transcript_path, encoding="utf-8") as f:
-            f.read()
-    except OSError:
-        return None
+    def handler(signum, frame):
+        stop_event.set()
 
-    # This would be implemented when needed:
-    # try:
-    #     result = subprocess.run(
-    #         processor_command,
-    #         input=transcript_text.encode('utf-8'),
-    #         capture_output=True,
-    #         shell=True,
-    #         check=True
-    #     )
-    #     return result.stdout.decode('utf-8')
-    # except subprocess.CalledProcessError:
-    #     return None
-
-    return None
+    signal.signal(signal.SIGINT, handler)
+    with contextlib.suppress(ValueError):
+        # SIGTERM/SIGHUP may not be settable on all platforms / from non-main threads.
+        signal.signal(signal.SIGTERM, handler)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 
-def ensure_model_exists(model_path: str) -> bool:
-    """Checks if the Vosk model exists and prints messages if not."""
-    if not os.path.exists(model_path):
-        logger.error(f"Model not found at {model_path}")
-        logger.error("Please run the setup script to download the model.")
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(["notify-send", "Talkat", "Model not found"], check=False)
-        return False
-    return True
-
-
-def run_calibration_command(current_config: dict[str, Any]):
-    """Runs microphone calibration and saves the threshold to the config file."""
+def run_calibrate() -> int:
+    """Run microphone calibration and persist the resulting threshold."""
     logger.info("Starting microphone calibration...")
     threshold = calibrate_microphone()
 
-    config_to_save = (
-        current_config.copy()
-    )  # Start with current config (could be from CLI overrides)
-    # Update it with the newly calibrated threshold
-    config_to_save["silence_threshold"] = threshold
+    config = load_app_config()
+    config["silence_threshold"] = threshold
+    save_app_config(config)
 
-    save_app_config(config_to_save)
     logger.info(f"Calibration complete. Threshold set to: {threshold:.1f}")
-    with contextlib.suppress(FileNotFoundError):
-        safe_subprocess_run(
-            ["notify-send", "Talkat", f"Calibration complete. Threshold: {threshold:.1f}"],
-            check=False,
-        )
+    _notify(f"Calibration complete. Threshold: {threshold:.1f}")
     return 0
 
 
-def run_listen_command(
-    model_type: str,
-    model_name: str,
-    silence_threshold: float,
-    model_cache_dir: str | None = None,
-    fw_device: str = "cpu",
-    fw_compute_type: str = "int8",
-    fw_device_index: int | list[int] = 0,
-    vosk_model_base_dir: str | None = None,  # New parameter for Vosk model base
-    output_file: str | None = None,  # Optional output file
-) -> int:
-    """Runs the main speech-to-text process by sending audio to a model server."""
-
-    # Set up process management for toggle functionality
-    import signal
-    import threading
+def listen_once(output_file: str | None = None) -> int:
+    """Record one utterance and either type it (default) or save it to a file."""
+    config = load_app_config()
 
     pm = ProcessManager("listen")
     pm.write_pid(os.getpid())
 
-    def cleanup_pid():
-        pm.cleanup_pid_file()
+    stop_event = threading.Event()
+    _set_stop_event_on_signal(stop_event)
 
-    # Flag to signal recording should stop
-    stop_recording = threading.Event()
+    _log_threshold_source(
+        float(config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"]))
+    )
 
-    # Set up signal handler for graceful shutdown when toggled off
-    def signal_handler(signum, frame):
-        logger.info("\nRecording stopped by toggle command. Finishing transcription...")
-        stop_recording.set()
-        cleanup_pid()
-        # The audio stream will stop naturally when it checks the flag
-
-    signal.signal(signal.SIGINT, signal_handler)
-
-    text = ""  # Initialize text variable
-
-    # Load configuration
-    config = load_app_config()
-
-    # Model loading is now handled by the model_server.py
-    # We only need to prepare and send the audio data.
-
-    # current_threshold = load_threshold() # Old way
-    # Use the passed silence_threshold
-    current_threshold = silence_threshold
-    if (
-        current_threshold == CODE_DEFAULTS["silence_threshold"]
-    ):  # Check if it's still the code default
-        # Check if a config file value was different, or if it's just the plain default
-        # This is mostly for informative message. The actual value is already correctly prioritised.
-        loaded_file_conf_val = load_app_config().get("silence_threshold")
-        if loaded_file_conf_val != CODE_DEFAULTS["silence_threshold"]:
-            logger.info(f"Using calibrated threshold from config: {current_threshold:.1f}")
-        else:
-            logger.info(
-                f"No calibrated threshold found in config or CLI. Using default: {current_threshold:.1f}"
-            )
-            logger.info("Run 'talkat calibrate' to set a custom threshold.")
-    else:
-        logger.info(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
+    _notify('Recording... Run "talkat listen" again to stop')
+    logger.info("Speech detected. Streaming audio to model server...")
+    logger.info("(Run 'talkat listen' again to stop recording)")
 
     try:
-        # --- Streaming Implementation ---
-        # record_audio_with_vad is now expected to be a generator:
-        # 1. yields sample_rate (int)
-        # 2. yields audio_chunk (bytes) ...
-        # Stops when speech ends.
-        audio_stream_generator_func = stream_audio_with_vad(
-            silence_threshold=current_threshold,
-            silence_duration=config.get("silence_duration", CODE_DEFAULTS["silence_duration"]),
-            debug=True,
-        )
-
-        # Get the sample rate first
-        try:
-            sample_rate = next(audio_stream_generator_func)
-            if not isinstance(sample_rate, int):
-                logger.error("record_audio_with_vad did not yield sample rate correctly.")
-                # Fallback or error out if rate is not an int (e.g. None if no speech first chunk)
-                # This also handles if the generator is empty (no speech detected from the start)
-                logger.warning("No speech detected or audio input error.")
-                with contextlib.suppress(FileNotFoundError):
-                    safe_subprocess_run(
-                        ["notify-send", "Talkat", "No speech detected"], check=False
-                    )
-                return 0  # Exit if no rate / no audio
-        except StopIteration:  # Generator was empty
-            logger.warning("No speech detected (empty audio stream).")
-            with contextlib.suppress(FileNotFoundError):
-                safe_subprocess_run(["notify-send", "Talkat", "No speech detected"], check=False)
-            return 0
-
-        logger.info(f"Speech detected. Streaming audio at {sample_rate} Hz to model server...")
-        logger.info("(Run 'talkat listen' again to stop recording)")
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(
-                ["notify-send", "Talkat", 'Recording... Run "talkat listen" again to stop'],
-                check=False,
-            )
-
-        def request_data_generator():
-            # First, send metadata as a JSON string line
-            metadata = {"rate": sample_rate}
-            yield json.dumps(metadata).encode("utf-8") + b"\n"
-            # Then, stream audio chunks from the modified record_audio_with_vad
-            for audio_chunk in audio_stream_generator_func:
-                if stop_recording.is_set():
-                    logger.info("Stopping audio stream due to toggle command...")
-                    break
-                if audio_chunk:  # Ensure not None or empty bytes if VAD yields such
-                    yield audio_chunk
-
-        server_url = f"{config.get('server_url', CODE_DEFAULTS['server_url'])}/transcribe_stream"
-        try:
-            # Increased timeout for potentially long streaming and server processing
-            response = requests.post(
-                server_url,
-                data=request_data_generator(),
-                timeout=config.get("http_timeout", CODE_DEFAULTS["http_timeout"]),
-            )
-            response.raise_for_status()
-
-            response_json = response.json()
-            text = response_json.get("text", "").strip()
-
-        except requests.exceptions.ConnectionError:
-            logger.error(f"Could not connect to the model server at {server_url}.")
-            logger.error(
-                "Please ensure the model server is running: python -m src.talkat.model_server"
-            )
-            with contextlib.suppress(FileNotFoundError):
-                safe_subprocess_run(
-                    ["notify-send", "Talkat", "Error: Model server not reachable."], check=False
-                )
-            return 1
-        except requests.exceptions.Timeout:
-            logger.error("Request to model server timed out.")
-            with contextlib.suppress(FileNotFoundError):
-                safe_subprocess_run(
-                    ["notify-send", "Talkat", "Error: Model server timeout."], check=False
-                )
-            return 1
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error communicating with model server: {e}")
-            with contextlib.suppress(FileNotFoundError):
-                safe_subprocess_run(
-                    ["notify-send", "Talkat", f"Server communication error: {e}"], check=False
-                )
-            return 1
-        except json.JSONDecodeError:
-            logger.error(f"Could not decode JSON response from server: {response.text}")
-            return 1
-
-        if text:
-            logger.info(f"Recognized: {text}")
-
-            # Save transcript for short mode if enabled
-            config = load_app_config()
-            if config.get("save_transcripts", True):
-                transcript_path = save_transcript(text, mode="short")
-                logger.info(f"Transcript saved to: {transcript_path}")
-
-            # Check if output to file is requested
-            if output_file:
-                # Save to specified file instead of typing
-                from pathlib import Path
-
-                output_path = Path(output_file).expanduser()
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_text(text, encoding="utf-8")
-                logger.info(f"Transcription saved to: {output_path}")
-                with contextlib.suppress(FileNotFoundError):
-                    safe_subprocess_run(
-                        ["notify-send", "Talkat", f"Saved to: {output_path.name}"], check=False
-                    )
-            else:
-                # Type to screen using ydotool
-                try:
-                    # Sanitize text before typing
-                    safe_text = sanitize_text_for_typing(text)
-                    safe_subprocess_run(["ydotool", "type", "--key-delay=1", safe_text], check=True)
-                    logger.info(f"Typed: {text}")
-                    with contextlib.suppress(FileNotFoundError):
-                        safe_subprocess_run(
-                            ["notify-send", "Talkat", f"Typed: {text[:100]}"], check=False
-                        )
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    logger.warning("ydotool not available, printing text instead:")
-                    print(f"TEXT: {text}")
-                    with contextlib.suppress(FileNotFoundError):
-                        safe_subprocess_run(
-                            ["notify-send", "Talkat", f"Recognized: {text[:100]}"], check=False
-                        )
-        else:
-            logger.warning("No text recognized in the audio")
-            with contextlib.suppress(FileNotFoundError):
-                safe_subprocess_run(["notify-send", "Talkat", "No text recognized"], check=False)
-
-        cleanup_pid()
-        return 0
-
-    except KeyboardInterrupt:
-        logger.info("\nRecording interrupted.")
-        cleanup_pid()
-        return 0
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        import traceback
-
-        traceback.print_exc()
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(["notify-send", "Talkat", f"Error: {e}"], check=False)
-        cleanup_pid()
+        with TranscriptionClient(config) as client:
+            text = client.transcribe_one_utterance(stop_event=stop_event, debug=True)
+    except AudioSessionError as e:
+        logger.error(str(e))
+        _notify(f"Audio error: {e}")
+        pm.cleanup_pid_file()
         return 1
+    except TranscriptionUnreachable as e:
+        logger.error(str(e))
+        _notify("Error: Model server not reachable.")
+        pm.cleanup_pid_file()
+        return 1
+    except TranscriptionServerError as e:
+        logger.error(str(e))
+        _notify(f"Server communication error: {e}")
+        pm.cleanup_pid_file()
+        return 1
+    except KeyboardInterrupt:
+        logger.info("Recording interrupted.")
+        pm.cleanup_pid_file()
+        return 0
+
+    if not text:
+        logger.warning("No text recognized in the audio")
+        _notify("No text recognized")
+        pm.cleanup_pid_file()
+        return 0
+
+    logger.info(f"Recognized: {text}")
+
+    if config.get("save_transcripts", True):
+        transcript_path = save_transcript(text, mode="short")
+        logger.info(f"Transcript saved to: {transcript_path}")
+
+    if output_file:
+        output_path = Path(output_file).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text, encoding="utf-8")
+        logger.info(f"Transcription saved to: {output_path}")
+        _notify(f"Saved to: {output_path.name}")
+    else:
+        try:
+            safe_text = sanitize_text_for_typing(text)
+            # timeout=None: typing a long transcript with --key-delay=1 can take
+            # well over the default 30s.
+            safe_subprocess_run(
+                ["ydotool", "type", "--key-delay=1", safe_text],
+                check=True,
+                timeout=None,
+            )
+            logger.info(f"Typed: {text}")
+            _notify(f"Typed: {text[:100]}")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.warning("ydotool not available, printing text instead:")
+            print(f"TEXT: {text}")
+            _notify(f"Recognized: {text[:100]}")
+
+    pm.cleanup_pid_file()
+    return 0
 
 
-def run_long_dictation_command(
-    model_type: str,
-    model_name: str,
-    silence_threshold: float,
-    model_cache_dir: str | None = None,
-    fw_device: str = "cpu",
-    fw_compute_type: str = "int8",
-    fw_device_index: int | list[int] = 0,
-    vosk_model_base_dir: str | None = None,
+def listen_continuous(
+    output_file: str | None = None,
+    background: bool = False,
     clipboard: bool = True,
-    output_file: str | None = None,  # Optional output file
-    background: bool = False,  # Whether this is a background process
-):
-    """Runs long dictation mode with continuous speech recognition."""
-    import threading
+) -> int:
+    """Run continuous dictation: loop transcribing utterances until interrupted."""
+    config = load_app_config()
 
-    # Set up process management for long dictation
     pm = ProcessManager("long_dictation")
-
-    # Only write PID if not already written by parent process
-    # (avoids redundant write when started via start-long/toggle-long)
-    is_running, existing_pid = pm.is_running()
+    _, existing_pid = pm.is_running()
     if existing_pid != os.getpid():
         pm.write_pid(os.getpid())
 
-    # Use a flag to signal graceful shutdown
-    shutdown_requested = threading.Event()
+    stop_event = threading.Event()
+    _set_stop_event_on_signal(stop_event)
 
-    def cleanup_pid():
-        pm.cleanup_pid_file()
+    _log_threshold_source(
+        float(config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"]))
+    )
 
-    # Custom signal handler that sets flag instead of exiting immediately
-    def graceful_shutdown_handler(signum, frame):
-        logger.info(f"Received signal {signum}, finishing current utterance...")
-        shutdown_requested.set()
-
-    # Register our custom signal handler
-    import signal
-
-    signal.signal(signal.SIGINT, graceful_shutdown_handler)
-    signal.signal(signal.SIGTERM, graceful_shutdown_handler)
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
-
-    # Load configuration
-    config = load_app_config()
-
-    # Use the passed silence_threshold
-    current_threshold = silence_threshold
-    if current_threshold == CODE_DEFAULTS["silence_threshold"]:
-        loaded_file_conf_val = load_app_config().get("silence_threshold")
-        if loaded_file_conf_val != CODE_DEFAULTS["silence_threshold"]:
-            logger.info(f"Using calibrated threshold from config: {current_threshold:.1f}")
-        else:
-            logger.info(
-                f"No calibrated threshold found in config or CLI. Using default: {current_threshold:.1f}"
-            )
-            logger.info("Run 'talkat calibrate' to set a custom threshold.")
-    else:
-        logger.info(f"Using threshold: {current_threshold:.1f} (from CLI or config)")
-
-    # Create a single transcript file for this session
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if output_file:
-        # Use user-specified output file
         transcript_path = Path(output_file).expanduser()
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_filename = transcript_path.name
     else:
-        # Use default timestamped file
         transcript_filename = f"{timestamp}_long.txt"
-        transcript_dir = get_transcript_dir()
-        transcript_path = transcript_dir / transcript_filename
-
-    # Create empty file to ensure it exists
+        transcript_path = get_transcript_dir() / transcript_filename
     transcript_path.touch()
 
     if background:
         logger.info("Starting long dictation mode (background).")
-        logger.info(f"Transcript will be saved to: {transcript_path}")
-        logger.info("Run 'talkat stop-long' or 'talkat toggle-long' to stop.")
-        if clipboard:
-            logger.info("Transcript will be copied to clipboard when finished.")
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(
-                [
-                    "notify-send",
-                    "Talkat",
-                    "Long dictation started. Run 'talkat toggle-long' to stop.",
-                ],
-                check=False,
-            )
+        _notify("Long dictation started. Run 'talkat toggle-long' to stop.")
     else:
         logger.info("Starting long dictation mode. Press Ctrl+C to stop.")
-        logger.info(f"Transcript will be saved to: {transcript_path}")
-        if clipboard:
-            logger.info("Transcript will be copied to clipboard when finished.")
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(
-                ["notify-send", "Talkat", "Long dictation mode started. Press Ctrl+C to stop."],
-                check=False,
-            )
+        _notify("Long dictation mode started. Press Ctrl+C to stop.")
+    logger.info(f"Transcript will be saved to: {transcript_path}")
+    if clipboard:
+        logger.info("Transcript will be copied to clipboard when finished.")
 
-    full_transcript = []
-    session = requests.Session()
-    return_code = 0  # Track return code
+    silence_timeout = float(
+        config.get("long_mode_silence_timeout", CODE_DEFAULTS["long_mode_silence_timeout"])
+    )
+    max_session_duration = float(
+        config.get(
+            "long_mode_max_session_duration",
+            CODE_DEFAULTS["long_mode_max_session_duration"],
+        )
+    )
+
+    full_transcript: list[str] = []
+    return_code = 0
+    session_start = time.monotonic()
+    last_speech_at = session_start
 
     try:
-        while not shutdown_requested.is_set():  # Continue until shutdown requested
-            logger.debug("Waiting for voice activity...")
+        with TranscriptionClient(config) as client:
+            while not stop_event.is_set():
+                now = time.monotonic()
+                if now - session_start > max_session_duration:
+                    logger.info(
+                        f"Reached max session duration "
+                        f"({max_session_duration / 60:.0f} min), stopping."
+                    )
+                    break
+                if now - last_speech_at > silence_timeout:
+                    logger.info(f"No speech for {silence_timeout:.0f}s, stopping.")
+                    break
 
-            # Check shutdown flag before starting new utterance
-            if shutdown_requested.is_set():
-                logger.info("Shutdown requested before starting new utterance")
-                break
-
-            # Use the existing stream_audio_with_vad for each utterance
-            # Use configured threshold to detect utterances (not continuous streaming)
-            audio_stream_generator_func = stream_audio_with_vad(
-                silence_threshold=current_threshold,
-                debug=False,  # Less verbose for continuous mode
-                max_duration=config.get(
-                    "long_mode_max_duration", CODE_DEFAULTS["long_mode_max_duration"]
-                ),
-            )
-
-            # Get the sample rate first
-            try:
-                sample_rate = next(audio_stream_generator_func)
-                if not isinstance(sample_rate, int):
-                    logger.error("stream_audio_with_vad did not yield sample rate correctly.")
-                    continue  # Try again for next utterance
-                logger.debug(f"Got sample rate: {sample_rate}")
-            except StopIteration:
-                # No speech detected in this cycle, wait a bit and try again
-                logger.debug("No speech detected, waiting...")
-                time.sleep(
-                    config.get("process_check_interval", CODE_DEFAULTS["process_check_interval"])
-                )
-                continue
-
-            # If shutdown was requested while waiting for speech, finish this utterance
-            if shutdown_requested.is_set():
-                logger.info("Shutdown requested, will finish transcribing current utterance")
-
-            # Collect audio data for this utterance
-            def request_data_generator(rate, stream_gen):
-                # First, send metadata as a JSON string line
-                metadata = {"rate": rate}
-                yield json.dumps(metadata).encode("utf-8") + b"\n"
-                # Then, stream audio chunks
-                # Continue streaming even if shutdown is requested - we want to finish this utterance
-                for audio_chunk in stream_gen:
-                    if audio_chunk:
-                        yield audio_chunk
-
-            server_url = (
-                f"{config.get('server_url', CODE_DEFAULTS['server_url'])}/transcribe_stream"
-            )
-            logger.debug(f"Sending audio to {server_url}...")
-            try:
-                response = session.post(
-                    server_url,
-                    data=request_data_generator(sample_rate, audio_stream_generator_func),
-                    timeout=config.get("http_timeout", CODE_DEFAULTS["http_timeout"]),
-                )
-                logger.debug(f"Got response with status code: {response.status_code}")
-                response.raise_for_status()
-
-                response_json = response.json()
-                text = response_json.get("text", "").strip()
+                # Cap each utterance attempt at the silence timeout so the loop
+                # wakes up to re-check session/silence limits between attempts.
+                try:
+                    text = client.transcribe_one_utterance(
+                        stop_event=stop_event,
+                        max_duration=silence_timeout,
+                        debug=False,
+                    )
+                except TranscriptionUnreachable as e:
+                    logger.error(str(e))
+                    _notify("Error: Model server not reachable.")
+                    return_code = 1
+                    break
+                except TranscriptionServerError as e:
+                    logger.error(str(e))
+                    if stop_event.is_set():
+                        break
+                    continue
+                except AudioSessionError as e:
+                    logger.error(f"Audio error: {e}")
+                    return_code = 1
+                    break
 
                 if text:
                     logger.info(f"Recognized: {text}")
                     full_transcript.append(text)
-
-                    # Save to file immediately
+                    last_speech_at = time.monotonic()
                     with open(transcript_path, "a", encoding="utf-8") as f:
                         f.write(text + " ")
-
-                    # Don't type in long dictation mode
-                    logger.debug("(Saved to transcript)")
-                else:
-                    logger.debug("Empty transcription received")
-
-            except requests.exceptions.ConnectionError:
-                logger.error(f"Could not connect to the model server at {server_url}.")
-                logger.error("Please ensure the model server is running: talkat server")
-                with contextlib.suppress(FileNotFoundError):
-                    safe_subprocess_run(
-                        ["notify-send", "Talkat", "Error: Model server not reachable."], check=False
-                    )
-                return_code = 1
-                break  # Exit loop on connection error
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error communicating with model server: {e}")
-                if shutdown_requested.is_set():
-                    break  # Exit if shutdown was requested
-                continue  # Try next utterance
-            except json.JSONDecodeError:
-                logger.error("Could not decode JSON response from server")
-                if shutdown_requested.is_set():
-                    break  # Exit if shutdown was requested
-                continue  # Try next utterance
-
-            # Check if we should exit after processing this utterance
-            if shutdown_requested.is_set():
-                logger.info("Shutdown complete after finishing utterance")
-                break
-
-    except KeyboardInterrupt:
-        # Handle Ctrl+C in foreground mode
-        logger.info("\nLong dictation mode stopped (Ctrl+C).")
     except Exception as e:
         logger.error(f"Error in long dictation mode: {e}")
-        import traceback
-
         traceback.print_exc()
         return_code = 1
     finally:
-        # Always run cleanup, regardless of how we exit
         logger.info("Cleaning up long dictation session...")
 
-        # Close the session cleanly
-        session.close()
-
-        # Join all transcript parts
         full_text = " ".join(full_transcript)
-
         if full_text:
-            # Copy to clipboard if enabled
-            if clipboard:
-                if copy_to_clipboard(full_text):
-                    logger.info("Transcript copied to clipboard!")
-                    with contextlib.suppress(FileNotFoundError):
-                        safe_subprocess_run(
-                            ["notify-send", "Talkat", "Transcript copied to clipboard"], check=False
-                        )
-                else:
-                    logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
-
+            word_count = len(full_text.split())
+            clipboard_ok = clipboard and copy_to_clipboard(full_text)
+            if clipboard and not clipboard_ok:
+                logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
             logger.info(f"Full transcript saved to: {transcript_path}")
-            logger.info(f"Total words: {len(full_text.split())}")
-
-            with contextlib.suppress(FileNotFoundError):
-                safe_subprocess_run(
-                    [
-                        "notify-send",
-                        "Talkat",
-                        f"Long dictation stopped. Saved to {transcript_filename}",
-                    ],
-                    check=False,
-                )
+            logger.info(f"Total words: {word_count}")
+            if clipboard_ok:
+                _notify(f"Stopped. {word_count} words copied to clipboard.")
+            else:
+                _notify(f"Stopped. {word_count} words saved to {transcript_filename}.")
         else:
             logger.info("No transcript to save (no speech detected)")
+            _notify("Stopped. No speech detected.")
 
-        cleanup_pid()
+        pm.cleanup_pid_file()
 
     return return_code
-
-
-def main(mode="listen", output_file=None, background=False):
-    # Load config (defaults updated by file)
-    initial_config = load_app_config()
-
-    parser = argparse.ArgumentParser(
-        description="Talkat: Speech-to-text utility.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
-    # Set default command based on mode
-    if mode == "calibrate":
-        default_command = "calibrate"
-    elif mode == "long":
-        default_command = "long"
-    else:
-        default_command = "listen"
-    parser.add_argument(
-        "command",
-        nargs="?",
-        default=default_command,
-        choices=["listen", "calibrate", "long"],
-        help="Command to run.",
-    )
-
-    # Set defaults for argparse from the loaded configuration
-    parser.add_argument(
-        "--model_type",
-        type=str,
-        default=initial_config.get("model_type"),
-        choices=["vosk", "faster-whisper"],
-        help="Type of speech recognition model to use.",
-    )
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default=initial_config.get("model_name"),
-        help='Name of the model. For Vosk, e.g., "model-en". For faster-whisper, e.g., "tiny.en".',
-    )
-    parser.add_argument(
-        "--silence_threshold",
-        type=float,
-        default=initial_config.get("silence_threshold"),
-        help="Silence threshold for VAD.",
-    )
-    parser.add_argument(
-        "--vosk_model_base_dir",
-        type=str,
-        default=initial_config.get("vosk_model_base_dir"),
-        help="Base directory for Vosk models.",
-    )
-
-    # Faster-whisper specific arguments
-    parser.add_argument(
-        "--faster_whisper_model_cache_dir",
-        type=str,
-        default=initial_config.get("faster_whisper_model_cache_dir"),
-        help="Optional: Custom cache directory for faster-whisper models.",
-    )
-    parser.add_argument(
-        "--fw_device",
-        type=str,
-        default=initial_config.get("fw_device"),
-        help='Device for faster-whisper (e.g., "cpu", "cuda").',
-    )
-    parser.add_argument(
-        "--fw_compute_type",
-        type=str,
-        default=initial_config.get("fw_compute_type"),
-        help='Compute type for faster-whisper (e.g., "int8", "float16").',
-    )
-
-    def parse_device_index_str(value_str: str) -> int | list[int]:
-        if not value_str.strip():
-            raise argparse.ArgumentTypeError(
-                f"fw_device_index string cannot be empty if provided. Got '{value_str}'"
-            )
-        if "," in value_str:
-            try:
-                return [int(x.strip()) for x in value_str.split(",")]
-            except ValueError:
-                raise argparse.ArgumentTypeError(
-                    f"Invalid format for multi-value fw_device_index: '{value_str}'. Must be comma-separated integers."
-                ) from None
-        else:
-            try:
-                return int(value_str)
-            except ValueError:
-                raise argparse.ArgumentTypeError(
-                    f"Invalid integer for fw_device_index: '{value_str}'."
-                ) from None
-
-    parser.add_argument(
-        "--fw_device_index",
-        type=parse_device_index_str,  # Converts CLI string to int or List[int]
-        default=initial_config.get("fw_device_index"),  # Actual default value, not a string
-        help='Device index for faster-whisper (e.g., 0 or "0,1" for multi-GPU).',
-    )
-
-    # Transcript and clipboard arguments
-    parser.add_argument(
-        "--no-clipboard",
-        action="store_true",
-        help="Disable clipboard copy for long dictation mode.",
-    )
-    parser.add_argument(
-        "--no-save-transcripts", action="store_true", help="Disable saving transcripts to files."
-    )
-    parser.add_argument(
-        "--transcript-dir",
-        type=str,
-        default=initial_config.get("transcript_dir"),
-        help="Directory to save transcripts.",
-    )
-
-    # Internal arguments (used by background process launcher)
-    parser.add_argument(
-        "--background",
-        action="store_true",
-        help=argparse.SUPPRESS,  # Hide from help text since it's internal
-    )
-
-    args = parser.parse_args()
-
-    # After parsing, args contains the final values following CLI > File > Code_Default hierarchy
-    # For calibration, we pass the resolved 'args' to carry over any CLI overrides to be saved.
-    # However, run_calibration_command should ideally work with the config state prior to *its own* CLI args.
-    # Let's adjust: run_calibration_command should operate on the initial_config, update it, and save.
-    # Any CLI args for *calibration itself* (if we had them) would be different.
-    # The current `args` reflects the final state for *running commands*.
-
-    if args.command == "calibrate":
-        # For saving, we want to preserve other settings from config/defaults,
-        # and only update the threshold.
-        # `initial_config` has defaults + file. CLI args for general settings are in `args`.
-        # We want to save a config that reflects the state if `listen` was run with these CLI args.
-        config_for_saving = initial_config.copy()
-        config_for_saving.update(vars(args))  # Apply CLI overrides to what we'll save
-        # Remove 'command' as it's not a persistent config
-        if "command" in config_for_saving:
-            del config_for_saving["command"]
-
-        return run_calibration_command(config_for_saving)  # Pass the effectively resolved config
-    elif args.command == "listen":
-        return run_listen_command(
-            model_type=args.model_type,
-            model_name=args.model_name,
-            silence_threshold=args.silence_threshold,
-            model_cache_dir=args.faster_whisper_model_cache_dir,
-            fw_device=args.fw_device,
-            fw_compute_type=args.fw_compute_type,
-            fw_device_index=args.fw_device_index,
-            vosk_model_base_dir=args.vosk_model_base_dir,
-            output_file=output_file,
-        )
-    elif args.command == "long":
-        # Determine clipboard setting
-        clipboard_enabled = initial_config.get("clipboard_on_long", True) and not args.no_clipboard
-
-        # Use background flag from either function parameter or CLI argument
-        is_background = background or args.background
-
-        return run_long_dictation_command(
-            model_type=args.model_type,
-            model_name=args.model_name,
-            silence_threshold=args.silence_threshold,
-            output_file=output_file,
-            model_cache_dir=args.faster_whisper_model_cache_dir,
-            fw_device=args.fw_device,
-            fw_compute_type=args.fw_compute_type,
-            fw_device_index=args.fw_device_index,
-            vosk_model_base_dir=args.vosk_model_base_dir,
-            clipboard=clipboard_enabled,
-            background=is_background,
-        )
-    else:
-        parser.print_help()
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

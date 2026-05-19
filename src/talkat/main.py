@@ -367,18 +367,19 @@ def listen_continuous(
 
         full_text = " ".join(full_transcript)
         if full_text:
-            if clipboard:
-                if copy_to_clipboard(full_text):
-                    logger.info("Transcript copied to clipboard!")
-                    _notify("Transcript copied to clipboard")
-                else:
-                    logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
-
+            word_count = len(full_text.split())
+            clipboard_ok = clipboard and copy_to_clipboard(full_text)
+            if clipboard and not clipboard_ok:
+                logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
             logger.info(f"Full transcript saved to: {transcript_path}")
-            logger.info(f"Total words: {len(full_text.split())}")
-            _notify(f"Long dictation stopped. Saved to {transcript_filename}")
+            logger.info(f"Total words: {word_count}")
+            if clipboard_ok:
+                _notify(f"Stopped. {word_count} words copied to clipboard.")
+            else:
+                _notify(f"Stopped. {word_count} words saved to {transcript_filename}.")
         else:
             logger.info("No transcript to save (no speech detected)")
+            _notify("Stopped. No speech detected.")
 
         pm.cleanup_pid_file()
 

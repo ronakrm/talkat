@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
-import contextlib
 import os
-import subprocess
 import sys
 
 from .file_processor import batch_process_files, process_audio_file_command
 from .logging_config import get_logger, setup_logging
 from .paths import ensure_user_directories
 from .process_manager import ProcessManager
-from .security import safe_subprocess_run
 
 logger = get_logger(__name__)
 
@@ -30,7 +27,12 @@ def get_listen_pid() -> int | None:
 
 
 def _start_long(pm: ProcessManager, debug: bool) -> int:
-    """Start the long-dictation background process. Caller holds the pm lock."""
+    """Start the long-dictation background process. Caller holds the pm lock.
+
+    Notifications are intentionally NOT fired here — the spawned process emits
+    its own start/stop notifications from main.py.listen_continuous so the user
+    sees exactly one "started" and one "stopped" toast per cycle.
+    """
     cmd = [sys.executable, "-m", "talkat.cli", "long", "--background"]
 
     env = None
@@ -41,28 +43,18 @@ def _start_long(pm: ProcessManager, debug: bool) -> int:
     pid = pm.start_background_process(cmd, debug=debug, env=env)
     if pid:
         logger.info(f"Long dictation started in background (PID: {pid})")
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(
-                ["notify-send", "Talkat", "Long dictation started"],
-                check=False,
-                stderr=subprocess.DEVNULL,
-            )
         return 0
     logger.error("Failed to start long dictation")
     return 1
 
 
 def _stop_long(pm: ProcessManager) -> int:
-    """Stop the long-dictation background process. Caller holds the pm lock."""
-    if pm.stop_process():
-        with contextlib.suppress(FileNotFoundError):
-            safe_subprocess_run(
-                ["notify-send", "Talkat", "Long dictation stopped"],
-                check=False,
-                stderr=subprocess.DEVNULL,
-            )
-        return 0
-    return 1
+    """Stop the long-dictation background process. Caller holds the pm lock.
+
+    The running process emits the user-facing stop notification (with transcript
+    summary) when it shuts down; we don't fire one here.
+    """
+    return 0 if pm.stop_process() else 1
 
 
 def start_long_background(debug: bool = False) -> int:
@@ -103,17 +95,15 @@ def toggle_long_background(debug: bool = False) -> int:
 
 
 def stop_listen_process() -> int:
-    """Stop the running listen process."""
+    """Stop the running listen process.
+
+    The running process emits its own typed/saved/no-text notification when it
+    finishes transcribing the captured audio — we don't fire one here.
+    """
     pm = ProcessManager("listen")
     try:
         with pm:
             if pm.stop_process():
-                with contextlib.suppress(FileNotFoundError):
-                    safe_subprocess_run(
-                        ["notify-send", "Talkat", "Recording stopped, transcribing..."],
-                        check=False,
-                        stderr=subprocess.DEVNULL,
-                    )
                 return 0
             logger.info("No active listen process found.")
             return 1

@@ -315,7 +315,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{param} must be boolean, got {type(config[param])}")
 
     choice_params = {
-        "model_type": ["faster-whisper", "distil-whisper", "vosk"],
+        "model_type": ["faster-whisper", "vosk"],
         "fw_device": ["cpu", "cuda", "auto"],
         "fw_compute_type": ["int8", "float16", "float32"],
         "device": ["cpu", "cuda", "auto"],
@@ -328,7 +328,6 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
     string_max_len = {
         "server_host": 255,
         "server_url": 2048,
-        "distil_model_name": 256,
     }
     for param, maxlen in string_max_len.items():
         if param in config:

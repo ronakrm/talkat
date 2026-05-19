@@ -41,14 +41,13 @@ CODE_DEFAULTS: dict[str, Any] = {
     "process_check_interval": 0.1,  # Sleep interval when checking process status
     "background_process_delay": 0.5,  # Delay when stopping background processes
     # Model Configuration
-    "model_type": "faster-whisper",  # Options: faster-whisper, distil-whisper, vosk
+    "model_type": "faster-whisper",  # Options: faster-whisper, vosk
     "model_name": "small.en",
     "faster_whisper_model_cache_dir": str(FASTER_WHISPER_CACHE_DIR),
     "fw_device": "cpu",
     "fw_compute_type": "int8",
     "fw_device_index": 0,
     "vosk_model_base_dir": str(VOSK_CACHE_DIR),
-    "distil_model_name": "distil-whisper/distil-medium.en",  # Medium model better for CPU
     "model_cache_dir": str(FASTER_WHISPER_CACHE_DIR.parent),
     "device": "cpu",  # cpu, cuda, auto - defaulting to CPU for compatibility
     # Application Features

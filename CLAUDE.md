@@ -106,21 +106,33 @@ uv run talkat stop-long
 uv run talkat toggle-long
 ```
 
-### Installation Modes
+### Installation
 
-#### System-wide Installation (requires sudo)
+Talkat is a per-user dictation tool. Two supported install paths:
+
+#### Local install from a git checkout
 ```bash
-sudo ./setup.sh
-# or explicitly:
-sudo ./setup.sh --system
+./setup.sh
+```
+Runs `uv tool install --reinstall .` (creates an isolated venv under
+`~/.local/share/uv/tools/talkat/`) and then `talkat install-service` to write
+`~/.config/systemd/user/talkat.service` pointing at that venv's interpreter.
+
+To uninstall:
+```bash
+talkat uninstall-service
+uv tool uninstall talkat
 ```
 
-#### User Installation (no sudo required)
+#### Packaged install (Arch / AUR)
+Build the package from `PKGBUILD`. It installs to `/usr/lib/talkat/` and
+ships `/usr/lib/systemd/user/talkat.service`. Enable with:
 ```bash
-./setup.sh --user
+systemctl --user enable --now talkat
 ```
 
-**Note**: After making changes to the code, always run `./setup.sh` (with appropriate mode) to update the installed version.
+**After code changes**, re-run `./setup.sh` (for the local path) or rebuild
+the package — both will restart the running service.
 
 ## Code Patterns and Conventions
 

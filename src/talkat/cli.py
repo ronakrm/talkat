@@ -171,6 +171,15 @@ def main() -> None:
     subparsers.add_parser("server", help="Start the model server")
     subparsers.add_parser("calibrate", help="Calibrate microphone threshold")
 
+    subparsers.add_parser(
+        "install-service",
+        help="Install + start the talkat user systemd service",
+    )
+    subparsers.add_parser(
+        "uninstall-service",
+        help="Stop + remove the talkat user systemd service",
+    )
+
     file_parser = subparsers.add_parser("file", help="Transcribe an audio file")
     file_parser.add_argument("input", help="Path to audio file (.wav, .mp3, .flac, etc.)")
     file_parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
@@ -239,6 +248,14 @@ def main() -> None:
         from .main import run_calibrate
 
         sys.exit(run_calibrate())
+    elif args.command == "install-service":
+        from .service import install_service
+
+        sys.exit(install_service())
+    elif args.command == "uninstall-service":
+        from .service import uninstall_service
+
+        sys.exit(uninstall_service())
     elif args.command == "file":
         sys.exit(process_audio_file_command(args.input, args.output, args.format, args.clipboard))
     elif args.command == "batch":

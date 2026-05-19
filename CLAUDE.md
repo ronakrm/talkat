@@ -126,14 +126,21 @@ uv tool uninstall talkat
 ```
 
 #### Packaged install (Arch / AUR)
-Build the package from `PKGBUILD`. It installs to `/usr/lib/talkat/` and
-ships `/usr/lib/systemd/user/talkat.service`. Enable with:
+Install via an AUR helper (`yay -S talkat`). The package installs to
+`/usr/lib/talkat/` and ships `/usr/lib/systemd/user/talkat.service`. Enable
+with:
 ```bash
 systemctl --user enable --now talkat
 ```
 
-**After code changes**, re-run `./setup.sh` (for the local path) or rebuild
-the package — both will restart the running service.
+The PKGBUILD lives in the AUR git repo
+(`ssh://aur@aur.archlinux.org/talkat.git`), not in this source tree — that's
+standard Arch packaging convention. Release flow: tag `vX.Y.Z` here → in
+the AUR clone, bump `pkgver`, run `updpkgsums`, regenerate `.SRCINFO`,
+push.
+
+**After code changes**, re-run `./setup.sh` to update the local install. It
+will restart the running service.
 
 ## Code Patterns and Conventions
 

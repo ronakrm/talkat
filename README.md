@@ -67,18 +67,23 @@ uv tool uninstall talkat
 
 ### Path 2: AUR package (Arch Linux)
 
-A `PKGBUILD` is included for building the Arch package locally. After
-building/installing the package:
+Talkat is published on the AUR as
+[`talkat`](https://aur.archlinux.org/packages/talkat). Install with your
+preferred AUR helper:
 
 ```bash
-makepkg -si        # builds + installs to /usr/lib/talkat with /usr/bin/talkat
+yay -S talkat       # or: paru -S talkat
 systemctl --user enable --now talkat
 ```
 
-The package ships its own `/usr/lib/systemd/user/talkat.service`, so do
+The AUR package ships its own `/usr/lib/systemd/user/talkat.service`, so do
 *not* run `talkat install-service` on top — just enable the unit directly.
 
 To uninstall: `sudo pacman -R talkat`.
+
+The PKGBUILD itself lives in the AUR git repo
+(`ssh://aur@aur.archlinux.org/talkat.git`), not in this source tree — that's
+the standard Arch packaging convention.
 
 ### One-time system setup for ydotool
 

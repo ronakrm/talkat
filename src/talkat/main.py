@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import requests
+import httpx
 
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
 from .logging_config import get_logger
@@ -97,7 +97,7 @@ class TranscriptionClient:
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
-        self.server_url: str = config.get("server_url", CODE_DEFAULTS["server_url"])
+        self.socket_path: str = config.get("server_socket", CODE_DEFAULTS["server_socket"])
         self.http_timeout: int = int(config.get("http_timeout", CODE_DEFAULTS["http_timeout"]))
         self.threshold: float = float(
             config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"])
@@ -105,10 +105,11 @@ class TranscriptionClient:
         self.silence_duration: float = float(
             config.get("silence_duration", CODE_DEFAULTS["silence_duration"])
         )
-        self._session = requests.Session()
+        transport = httpx.HTTPTransport(uds=self.socket_path)
+        self._client = httpx.Client(transport=transport, timeout=self.http_timeout)
 
     def close(self) -> None:
-        self._session.close()
+        self._client.close()
 
     def __enter__(self) -> "TranscriptionClient":
         return self
@@ -138,7 +139,6 @@ class TranscriptionClient:
             debug=debug,
         ) as session:
             metadata = {"rate": session.sample_rate}
-            stream_url = f"{self.server_url}/transcribe_stream"
 
             def body():
                 yield json.dumps(metadata).encode("utf-8") + b"\n"
@@ -146,17 +146,19 @@ class TranscriptionClient:
                     if chunk:
                         yield chunk
 
+            # The host part of the URL is ignored when using a unix-socket transport;
+            # only the path matters. We use a placeholder host purely for httpx hygiene.
             try:
-                response = self._session.post(stream_url, data=body(), timeout=self.http_timeout)
+                response = self._client.post("http://talkat/transcribe_stream", content=body())
                 response.raise_for_status()
-            except requests.exceptions.ConnectionError as e:
+            except httpx.ConnectError as e:
                 raise TranscriptionUnreachable(
-                    f"Could not connect to the model server at {stream_url}. "
-                    "Please ensure the model server is running: talkat server"
+                    f"Could not connect to the model server at {self.socket_path}. "
+                    "Ensure it's running: systemctl --user status talkat"
                 ) from e
-            except requests.exceptions.Timeout as e:
+            except httpx.TimeoutException as e:
                 raise TranscriptionUnreachable(f"Request to model server timed out: {e}") from e
-            except requests.exceptions.RequestException as e:
+            except httpx.HTTPError as e:
                 raise TranscriptionServerError(f"Error communicating with model server: {e}") from e
 
             try:

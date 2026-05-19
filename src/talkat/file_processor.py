@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-import requests
+import httpx
 
 from .logging_config import get_logger
 from .security import safe_subprocess_run, validate_file_path
@@ -12,35 +12,36 @@ from .security import safe_subprocess_run, validate_file_path
 logger = get_logger(__name__)
 
 
+def _make_client(socket_path: str, timeout: float) -> httpx.Client:
+    return httpx.Client(transport=httpx.HTTPTransport(uds=socket_path), timeout=timeout)
+
+
 def transcribe_audio_file(
-    file_path: str, server_url: str | None = None, output_format: str = "text"
+    file_path: str, socket_path: str | None = None, output_format: str = "text"
 ) -> tuple[str, float]:
     """
-    Transcribe an audio file using the model server.
+    Transcribe an audio file by uploading it to the model server.
 
     Args:
         file_path: Path to the audio file
-        server_url: URL of the model server (uses config default if None)
+        socket_path: Unix socket path of the model server (uses config default if None)
         output_format: Output format (text, json, srt, vtt)
 
     Returns:
         Tuple of (transcription, duration in seconds)
     """
-    # Load configuration
     from .config import CODE_DEFAULTS, load_app_config
+
     config = load_app_config()
-    
-    # Use configured server URL if not provided
-    if server_url is None:
-        server_url = config.get("server_url", CODE_DEFAULTS["server_url"])
-    
-    # Validate and sanitize file path
+
+    if socket_path is None:
+        socket_path = config.get("server_socket", CODE_DEFAULTS["server_socket"])
+
     try:
         file_path_obj = validate_file_path(file_path, must_exist=True)
     except Exception as e:
         raise FileNotFoundError(f"Invalid audio file: {e}") from e
 
-    # Check file extension
     supported_formats = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".mp4", ".webm"}
     if file_path_obj.suffix.lower() not in supported_formats:
         raise ValueError(f"Unsupported file format: {file_path_obj.suffix}")
@@ -56,37 +57,33 @@ def transcribe_audio_file(
     logger.info(f"Loading audio file: {file_path_obj}")
 
     try:
-        # Load audio file and resample to 16kHz
         audio_data, sample_rate = librosa.load(str(file_path_obj), sr=16000, mono=True)
         duration = len(audio_data) / sample_rate
-
         logger.info(f"Audio loaded: {duration:.1f} seconds at {sample_rate} Hz")
 
-        # Check if server is running
-        try:
-            health_response = requests.get(
-                f"{server_url}/health", 
-                timeout=config.get("health_check_timeout", CODE_DEFAULTS["health_check_timeout"])
-            )
-            if health_response.status_code != 200:
-                logger.error("Model server is not ready")
-                sys.exit(1)
-        except requests.ConnectionError:
-            logger.error("Model server is not running")
-            logger.error("Start it with: talkat server")
-            sys.exit(1)
+        health_timeout = config.get("health_check_timeout", CODE_DEFAULTS["health_check_timeout"])
+        request_timeout = max(
+            config.get(
+                "file_processing_timeout_base",
+                CODE_DEFAULTS["file_processing_timeout_base"],
+            ),
+            duration * 2,
+        )
 
-        # Send file to server for transcription
-        with open(file_path_obj, "rb") as f:
-            files = {"audio": (file_path_obj.name, f, "audio/*")}
-            response = requests.post(
-                f"{server_url}/transcribe_file",
-                files=files,
-                timeout=max(
-                    config.get("file_processing_timeout_base", CODE_DEFAULTS["file_processing_timeout_base"]), 
-                    duration * 2
-                ),  # Dynamic timeout based on duration
-            )
+        with _make_client(socket_path, request_timeout) as client:
+            try:
+                health = client.get("http://talkat/health", timeout=health_timeout)
+                if health.status_code != 200:
+                    logger.error("Model server is not ready")
+                    sys.exit(1)
+            except httpx.ConnectError:
+                logger.error(f"Model server is not running (socket: {socket_path})")
+                logger.error("Start it with: systemctl --user start talkat")
+                sys.exit(1)
+
+            with open(file_path_obj, "rb") as f:
+                files = {"audio": (file_path_obj.name, f, "audio/*")}
+                response = client.post("http://talkat/transcribe_file", files=files)
 
         if response.status_code != 200:
             error_msg = response.json().get("error", "Unknown error")

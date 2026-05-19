@@ -3,12 +3,14 @@ import os
 import sys
 import tempfile
 import traceback
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import vosk
 from faster_whisper import WhisperModel
 from flask import Flask, jsonify, request
+from waitress import serve
 
 from talkat.config import CODE_DEFAULTS, load_app_config
 from talkat.logging_config import get_logger
@@ -451,12 +453,19 @@ def update_dictionary():
 def main():
     _service.initialize()
     config = load_app_config()
-    host = config.get("server_host", CODE_DEFAULTS["server_host"])
-    port = config.get("server_port", CODE_DEFAULTS["server_port"])
-    logger.info(f"Starting Talkat model server on {host}:{port}")
-    # threaded=False serializes requests; safe for single-user use and removes
-    # the need to make model/recognizer state thread-safe.
-    app.run(host=host, port=port, threaded=False)
+    socket_path = Path(config.get("server_socket", CODE_DEFAULTS["server_socket"]))
+
+    # Ensure the runtime dir exists and remove any stale socket left over from
+    # a previous crash. waitress recreates it on bind.
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+    if socket_path.exists():
+        socket_path.unlink()
+
+    logger.info(f"Starting Talkat model server on {socket_path}")
+    # waitress serializes requests on a single thread by default, which keeps
+    # model/recognizer state safe without explicit locking. unix_socket_perms
+    # 0600 restricts the socket to the owning user.
+    serve(app, unix_socket=str(socket_path), unix_socket_perms="0600")
 
 
 if __name__ == "__main__":

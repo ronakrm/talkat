@@ -43,6 +43,7 @@ LOG_DIR = DATA_DIR / "logs"
 RUNTIME_DIR = XDG_RUNTIME_DIR / APP_NAME
 PID_DIR = RUNTIME_DIR
 LOCK_DIR = RUNTIME_DIR
+SOCKET_FILE = RUNTIME_DIR / "server.sock"
 
 # System-wide paths (when installed system-wide)
 SYSTEM_CONFIG_DIR = Path("/etc") / APP_NAME

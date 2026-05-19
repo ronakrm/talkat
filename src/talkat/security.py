@@ -275,6 +275,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         "faster_whisper_model_cache_dir",
         "vosk_model_base_dir",
         "dictionary_file",
+        "server_socket",
     ]
     for key in path_keys:
         if key in config:
@@ -290,7 +291,6 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         "max_recording_duration": (0, 3600),
         "long_mode_max_duration": (0, 86400),
         "fw_device_index": (0, 100),
-        "server_port": (1, 65535),
         "http_timeout": (0, 3600),
         "health_check_timeout": (0, 60),
         "file_processing_timeout_base": (0, 3600),
@@ -325,10 +325,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{param} must be one of {choices}, got {config[param]}")
 
     # Bounded free-form strings — guard against accidental DoS via huge values.
-    string_max_len = {
-        "server_host": 255,
-        "server_url": 2048,
-    }
+    string_max_len: dict[str, int] = {}
     for param, maxlen in string_max_len.items():
         if param in config:
             if not isinstance(config[param], str):

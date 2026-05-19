@@ -42,24 +42,25 @@ def test_validate_empty_config_ok():
     assert validate_json_config({}) == {}
 
 
-def test_validate_server_port_ok():
-    cfg = validate_json_config({"server_port": 5555})
-    assert cfg["server_port"] == 5555
-
-
-def test_validate_server_port_too_high_rejected():
-    with pytest.raises(ValueError):
-        validate_json_config({"server_port": 70000})
-
-
-def test_validate_server_port_zero_rejected():
-    with pytest.raises(ValueError):
-        validate_json_config({"server_port": 0})
-
-
 def test_validate_model_type_rejected():
     with pytest.raises(ValueError):
         validate_json_config({"model_type": "gpt-4"})
+
+
+def test_validate_model_type_faster_whisper_ok():
+    cfg = validate_json_config({"model_type": "faster-whisper"})
+    assert cfg["model_type"] == "faster-whisper"
+
+
+def test_validate_model_type_vosk_ok():
+    cfg = validate_json_config({"model_type": "vosk"})
+    assert cfg["model_type"] == "vosk"
+
+
+def test_validate_distil_whisper_rejected():
+    """distil-whisper is no longer a valid model_type (was never implemented)."""
+    with pytest.raises(ValueError):
+        validate_json_config({"model_type": "distil-whisper"})
 
 
 def test_validate_clipboard_on_long_must_be_bool():
@@ -75,3 +76,8 @@ def test_validate_negative_http_timeout_rejected():
 def test_validate_http_timeout_ok():
     cfg = validate_json_config({"http_timeout": 60})
     assert cfg["http_timeout"] == 60
+
+
+def test_validate_silence_threshold_out_of_range_rejected():
+    with pytest.raises(ValueError):
+        validate_json_config({"silence_threshold": 100000})

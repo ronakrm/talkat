@@ -7,6 +7,7 @@ from .paths import (
     CONFIG_FILE,
     DICTIONARY_FILE,
     FASTER_WHISPER_CACHE_DIR,
+    SOCKET_FILE,
     TRANSCRIPT_DIR,
     VOSK_CACHE_DIR,
     get_config_file,
@@ -27,11 +28,9 @@ CODE_DEFAULTS: dict[str, Any] = {
     "max_recording_duration": 30.0,  # Max duration for short recordings (seconds)
     "long_mode_max_duration": 600.0,  # Max duration for long mode (10 minutes)
     # Server Configuration
-    "server_host": "127.0.0.1",  # Server bind address
-    "server_port": 5555,  # Server port
-    "server_url": "http://127.0.0.1:5555",  # Complete server URL for clients
-    # Network Timeouts
-    "http_timeout": 120,  # General HTTP request timeout (seconds)
+    "server_socket": str(SOCKET_FILE),  # Unix domain socket path for the model server
+    # Network Timeouts (apply to local unix-socket requests)
+    "http_timeout": 120,  # General request timeout (seconds)
     "health_check_timeout": 2,  # Health check timeout (seconds)
     "file_processing_timeout_base": 30,  # Base timeout for file processing (seconds)
     # Process Management Timeouts

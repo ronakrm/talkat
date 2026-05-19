@@ -26,7 +26,8 @@ dependencies = [
     "pyaudio>=0.2.14",
     "vosk>=0.3.45",
     "flask>=2.0",
-    "requests>=2.20",
+    "waitress>=2.1",
+    "httpx>=0.25",
     "librosa>=0.10.1",
     "soundfile>=0.12.1"
 ]
@@ -45,7 +46,6 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.8.0",
     "pre-commit>=3.5.0",
-    "types-requests>=2.31.0",
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0"
 ]
@@ -115,6 +115,7 @@ module = [
     "vosk.*",
     "faster_whisper.*",
     "librosa.*",
-    "soundfile.*"
+    "soundfile.*",
+    "waitress.*"
 ]
 ignore_missing_imports = true

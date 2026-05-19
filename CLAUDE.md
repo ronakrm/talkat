@@ -32,9 +32,10 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
 ### Core Components
 
 1. **Model Server** (`model_server.py`)
-   - Flask HTTP server on port 5555
+   - Flask app served by `waitress` over a unix domain socket at
+     `$XDG_RUNTIME_DIR/talkat/server.sock` (perms 0600)
    - Loads and manages speech recognition models
-   - Provides batch and streaming transcription endpoints
+   - Provides streaming + file transcription endpoints
    - Supports Faster-Whisper (default) and Vosk models
 
 2. **Client** (`main.py`)
@@ -378,9 +379,10 @@ Since no automated tests exist, these need manual verification:
 ### Common Issues
 
 1. **"Server not responding"**
-   - Check: `systemctl status talkat` (system) or `systemctl --user status talkat` (user)
-   - Check: `lsof -i :5555`
-   - Try: `systemctl restart talkat` (system) or `systemctl --user restart talkat` (user)
+   - Check: `systemctl --user status talkat`
+   - Check socket: `ls -la "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/server.sock"`
+   - Probe: `curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/server.sock" http://talkat/health`
+   - Try: `systemctl --user restart talkat`
 
 2. **"No audio input"**
    - Check: `pactl list sources`

@@ -111,27 +111,34 @@ fi
 echo "Installing Python dependencies..."
 cd "$APP_DIR"
 
-# For system-wide installs, set UV_PYTHON_INSTALL_DIR to a shared location
 if [ "$SERVICE_TYPE" = "system" ]; then
-    export UV_PYTHON_INSTALL_DIR="$APP_DIR/.venv/python"
-    echo "Installing Python to shared location: $UV_PYTHON_INSTALL_DIR"
-
-    # Clean old venv if it exists and points to wrong location (e.g., /root/.local)
-    if [ -L "$APP_DIR/.venv/bin/python" ]; then
-        PYTHON_TARGET=$(readlink "$APP_DIR/.venv/bin/python")
-        if [[ "$PYTHON_TARGET" == /root/* ]]; then
-            echo "Removing old venv with inaccessible Python location..."
-            rm -rf "$APP_DIR/.venv"
-        fi
+    # System install: create the venv explicitly, pinned to system Python, then
+    # install talkat into it. Mirrors the PKGBUILD layout so /usr/share/talkat/.venv
+    # is self-contained and reachable by the non-root service user without
+    # depending on a uv-managed Python under /root.
+    SYSTEM_PYTHON=$(command -v python3.12 || command -v python3.11 || command -v python3)
+    if [ -z "$SYSTEM_PYTHON" ]; then
+        echo "Error: no suitable system Python found (need python3.11 or newer)."
+        exit 1
     fi
-fi
+    echo "Using system Python: $SYSTEM_PYTHON"
 
-uv sync
+    # Wipe any stale or half-created .venv before recreating.
+    if [ -d "$APP_DIR/.venv" ] && [ ! -x "$APP_DIR/.venv/bin/python" ]; then
+        echo "Removing broken/stale .venv at $APP_DIR/.venv..."
+        rm -rf "$APP_DIR/.venv"
+    fi
 
-# For system-wide installs, fix ownership so the service user can access the venv
-if [ "$SERVICE_TYPE" = "system" ]; then
+    uv venv "$APP_DIR/.venv" --python "$SYSTEM_PYTHON"
+    uv pip install --python "$APP_DIR/.venv/bin/python" .
+
+    PYTHON_BIN="$APP_DIR/.venv/bin/python"
+
     echo "Setting ownership for user $USER_NAME..."
     chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
+else
+    # User install: standard uv-managed workflow.
+    uv sync
 fi
 
 # Create service file
@@ -146,8 +153,7 @@ After=network.target
 Type=simple
 User=$USER_NAME
 WorkingDirectory=$APP_DIR
-Environment="UV_PYTHON_INSTALL_DIR=/usr/share/talkat/.venv/python"
-ExecStart=/usr/bin/uv run talkat server
+ExecStart=$PYTHON_BIN -m talkat.cli server
 Restart=always
 RestartSec=3
 
@@ -174,11 +180,18 @@ fi
 
 # Create client wrapper script
 echo "Creating client wrapper script..."
-cat > "$BIN_DIR/talkat" << EOF
+if [ "$SERVICE_TYPE" = "system" ]; then
+    cat > "$BIN_DIR/talkat" << EOF
+#!/bin/bash
+exec $PYTHON_BIN -m talkat.cli "\$@"
+EOF
+else
+    cat > "$BIN_DIR/talkat" << EOF
 #!/bin/bash
 cd $APP_DIR
 exec uv run talkat "\$@"
 EOF
+fi
 
 chmod +x "$BIN_DIR/talkat"
 

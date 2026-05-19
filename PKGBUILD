@@ -1,6 +1,6 @@
 # Maintainer: Ronak Mehta <ronakrm@gmail.com>
 pkgname=talkat
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Voice-to-text dictation system for Wayland Linux compositors"
 arch=('any')

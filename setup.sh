@@ -5,9 +5,8 @@
 # your project python environments) and writes a user systemd unit that
 # starts the model server on login.
 #
-# Arch users: prefer the AUR package (PKGBUILD) — it ships a system-wide
-# user-systemd unit at /usr/lib/systemd/user/talkat.service and you can
-# enable it with `systemctl --user enable --now talkat`.
+# Arch users: prefer the AUR package (`yay -S talkat`) — it ships a
+# system-wide user-systemd unit at /usr/lib/systemd/user/talkat.service.
 
 set -e
 

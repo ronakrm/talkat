@@ -51,16 +51,13 @@ def _start_long(pm: ProcessManager, debug: bool) -> int:
 def _stop_long(pm: ProcessManager) -> int:
     """Stop the long-dictation background process. Caller holds the pm lock.
 
-    Uses a generous SIGINT-wait window (120s) before escalating to SIGTERM
-    so the process can finish any in-flight server transcription and write
-    the transcript out in its ``finally`` block. faster-whisper on CPU
-    transcribes roughly in real-time, so a 60s utterance needs ~60s to
-    transcribe — the 5s default would SIGKILL the process mid-response.
+    The long process self-terminates on extended silence or max session
+    duration (see listen_continuous), so manual stop is the rare path.
 
     The running process emits the user-facing stop notification (with
     transcript summary) when it shuts down; we don't fire one here.
     """
-    return 0 if pm.stop_process(timeout=120.0) else 1
+    return 0 if pm.stop_process() else 1
 
 
 def start_long_background(debug: bool = False) -> int:
@@ -103,17 +100,13 @@ def toggle_long_background(debug: bool = False) -> int:
 def stop_listen_process() -> int:
     """Stop the running listen process.
 
-    Uses a 60s SIGINT-wait window so the process can finish in-flight
-    server transcription (up to max_recording_duration = 30s of audio at
-    roughly real-time) and type the result before it gets SIGKILL'd.
-
     The running process emits its own typed/saved/no-text notification when
     it finishes transcribing — we don't fire one here.
     """
     pm = ProcessManager("listen")
     try:
         with pm:
-            if pm.stop_process(timeout=60.0):
+            if pm.stop_process():
                 return 0
             logger.info("No active listen process found.")
             return 1

@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -322,20 +323,41 @@ def listen_continuous(
     if clipboard:
         logger.info("Transcript will be copied to clipboard when finished.")
 
-    long_mode_max = float(
-        config.get("long_mode_max_duration", CODE_DEFAULTS["long_mode_max_duration"])
+    silence_timeout = float(
+        config.get("long_mode_silence_timeout", CODE_DEFAULTS["long_mode_silence_timeout"])
+    )
+    max_session_duration = float(
+        config.get(
+            "long_mode_max_session_duration",
+            CODE_DEFAULTS["long_mode_max_session_duration"],
+        )
     )
 
     full_transcript: list[str] = []
     return_code = 0
+    session_start = time.monotonic()
+    last_speech_at = session_start
 
     try:
         with TranscriptionClient(config) as client:
             while not stop_event.is_set():
+                now = time.monotonic()
+                if now - session_start > max_session_duration:
+                    logger.info(
+                        f"Reached max session duration "
+                        f"({max_session_duration / 60:.0f} min), stopping."
+                    )
+                    break
+                if now - last_speech_at > silence_timeout:
+                    logger.info(f"No speech for {silence_timeout:.0f}s, stopping.")
+                    break
+
+                # Cap each utterance attempt at the silence timeout so the loop
+                # wakes up to re-check session/silence limits between attempts.
                 try:
                     text = client.transcribe_one_utterance(
                         stop_event=stop_event,
-                        max_duration=long_mode_max,
+                        max_duration=silence_timeout,
                         debug=False,
                     )
                 except TranscriptionUnreachable as e:
@@ -356,6 +378,7 @@ def listen_continuous(
                 if text:
                     logger.info(f"Recognized: {text}")
                     full_transcript.append(text)
+                    last_speech_at = time.monotonic()
                     with open(transcript_path, "a", encoding="utf-8") as f:
                         f.write(text + " ")
     except Exception as e:

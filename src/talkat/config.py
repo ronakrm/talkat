@@ -26,7 +26,10 @@ CODE_DEFAULTS: dict[str, Any] = {
     "silence_threshold_max": 5000.0,  # Maximum allowed silence threshold
     # Recording Timeouts and Durations
     "max_recording_duration": 30.0,  # Max duration for short recordings (seconds)
-    "long_mode_max_duration": 600.0,  # Max duration for long mode (10 minutes)
+    # Long mode auto-stops after this much continuous silence (no speech detected).
+    "long_mode_silence_timeout": 60.0,
+    # Hard cap on a single long-mode session.
+    "long_mode_max_session_duration": 1800.0,  # 30 minutes
     # Server Configuration
     "server_socket": str(SOCKET_FILE),  # Unix domain socket path for the model server
     # Network Timeouts (apply to local unix-socket requests)

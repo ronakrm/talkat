@@ -1,19 +1,28 @@
 """Process management for Talkat with proper locking and signal handling."""
 
+import contextlib
 import fcntl
 import os
 import signal
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import FrameType, TracebackType
-from typing import Self
+from typing import IO, Self
 
 from .logging_config import get_logger
 from .paths import LOCK_DIR, LOG_DIR, PID_DIR
 
 logger = get_logger(__name__)
+
+
+class LockTimeout(RuntimeError):
+    """Raised when a process lock cannot be acquired within the timeout."""
+
+
+class PIDWriteError(RuntimeError):
+    """Raised when the atomic PID-file write fails."""
 
 
 class ProcessManager:
@@ -36,45 +45,54 @@ class ProcessManager:
         Acquire an exclusive lock for this process.
 
         Args:
-            timeout: Maximum time to wait for lock (uses config default if None)
+            timeout: Seconds to keep retrying. ``0`` performs a single
+                non-blocking attempt. ``None`` uses the configured default.
 
         Returns:
-            True if lock acquired, False otherwise
+            True if lock acquired, False otherwise. On failure the underlying
+            fd is closed so the manager can be reused.
         """
         if timeout is None:
             from .config import CODE_DEFAULTS, load_app_config
 
             config = load_app_config()
-            timeout = config.get("lock_acquire_timeout", CODE_DEFAULTS["lock_acquire_timeout"])
+            timeout = float(
+                config.get("lock_acquire_timeout", CODE_DEFAULTS["lock_acquire_timeout"])
+            )
 
         try:
             self._lock_fd = os.open(str(self.lock_file), os.O_CREAT | os.O_WRONLY)
+        except OSError as e:
+            logger.error(f"Error opening lock file {self.lock_file}: {e}")
+            return False
 
-            # Try to acquire lock with timeout
-            start_time = time.time()
-            retry_interval = None
-
-            while time.time() - start_time < timeout:
-                try:
-                    fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    logger.debug(f"Acquired lock for {self.process_name}")
-                    return True
-                except OSError:
-                    if retry_interval is None:
-                        from .config import CODE_DEFAULTS, load_app_config
-
-                        config = load_app_config()
-                        retry_interval = config.get(
-                            "lock_retry_interval", CODE_DEFAULTS["lock_retry_interval"]
+        # Always attempt at least once even if timeout=0; only loop while we
+        # still have budget left.
+        start_time = time.monotonic()
+        retry_interval: float | None = None
+        while True:
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                logger.debug(f"Acquired lock for {self.process_name}")
+                return True
+            except OSError:
+                if time.monotonic() - start_time >= timeout:
+                    if timeout > 0:
+                        logger.warning(
+                            f"Failed to acquire lock for {self.process_name} " f"within {timeout}s"
                         )
-                    time.sleep(retry_interval)
+                    with contextlib.suppress(OSError):
+                        os.close(self._lock_fd)
+                    self._lock_fd = None
+                    return False
+                if retry_interval is None:
+                    from .config import CODE_DEFAULTS, load_app_config
 
-            logger.warning(f"Failed to acquire lock for {self.process_name} within {timeout}s")
-            return False
-
-        except Exception as e:
-            logger.error(f"Error acquiring lock: {e}")
-            return False
+                    config = load_app_config()
+                    retry_interval = float(
+                        config.get("lock_retry_interval", CODE_DEFAULTS["lock_retry_interval"])
+                    )
+                time.sleep(retry_interval)
 
     def release_lock(self) -> None:
         """Release the process lock."""
@@ -86,6 +104,31 @@ class ProcessManager:
                 logger.debug(f"Released lock for {self.process_name}")
             except Exception as e:
                 logger.error(f"Error releasing lock: {e}")
+
+    @contextlib.contextmanager
+    def locked(self, try_only: bool = False) -> Iterator["ProcessManager"]:
+        """Hold the process lock for the duration of the with block.
+
+        Args:
+            try_only: If True, perform a single non-blocking acquire and
+                raise immediately if the lock is held by someone else.
+                Otherwise use the configured retry timeout.
+
+        Raises:
+            LockTimeout: if the lock cannot be acquired.
+        """
+        timeout = 0.0 if try_only else None
+        if not self.acquire_lock(timeout=timeout):
+            why = (
+                "is held by another talkat command"
+                if try_only
+                else "could not be acquired within the timeout"
+            )
+            raise LockTimeout(f"Lock for {self.process_name} {why}")
+        try:
+            yield self
+        finally:
+            self.release_lock()
 
     def is_running(self) -> tuple[bool, int | None]:
         """
@@ -132,10 +175,16 @@ class ProcessManager:
 
     def write_pid(self, pid: int) -> None:
         """
-        Write PID to file with atomic operation.
+        Atomically write the PID file.
 
         Args:
             pid: Process ID to write
+
+        Raises:
+            PIDWriteError: on any I/O failure. Callers that spawned a child
+                before this call must kill that child when it raises —
+                otherwise the child runs unsupervised because nothing tracks
+                its PID anymore.
         """
         temp_file = self.pid_file.with_suffix(".tmp")
         try:
@@ -143,10 +192,12 @@ class ProcessManager:
                 f.write(str(pid))
             temp_file.rename(self.pid_file)
             logger.debug(f"Wrote PID {pid} to {self.pid_file}")
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Error writing PID file: {e}")
-            if temp_file.exists():
-                temp_file.unlink()
+            with contextlib.suppress(OSError):
+                if temp_file.exists():
+                    temp_file.unlink()
+            raise PIDWriteError(f"Failed to write PID file {self.pid_file}: {e}") from e
 
     def cleanup_pid_file(self) -> None:
         """Remove PID file if it exists."""
@@ -234,16 +285,21 @@ class ProcessManager:
         """
         Start a background process with proper signal handling.
 
+        Atomicity: the child is spawned, then its PID is written to the PID
+        file. If the write fails the child is killed so we never leak an
+        unsupervised process. The window between Popen returning and write_pid
+        is small (microseconds) but is also covered by the child's own
+        self-registration in listen_continuous as a defence-in-depth measure.
+
         Args:
             cmd: Command and arguments to run
             debug: If True, redirect output to log files instead of DEVNULL
             env: Optional environment variables to pass to the process
 
         Returns:
-            PID of started process or None on failure
+            PID of started process, or None on failure (child is killed if the
+            failure happens after Popen).
         """
-        from typing import IO
-
         log_handle: IO[str] | None = None
         try:
             if debug:
@@ -267,7 +323,18 @@ class ProcessManager:
             )
 
             pid = process.pid
-            self.write_pid(pid)
+            try:
+                self.write_pid(pid)
+            except PIDWriteError:
+                # The child is running but we couldn't record its PID — that
+                # would leave an orphan. Kill it so the user can retry from a
+                # clean state.
+                logger.error(f"Could not record PID for child {pid}; terminating it")
+                with contextlib.suppress(Exception):
+                    process.kill()
+                    process.wait(timeout=2)
+                return None
+
             logger.info(f"Started {self.process_name} process with PID {pid}")
             return pid
 
@@ -280,36 +347,42 @@ class ProcessManager:
             if log_handle is not None:
                 log_handle.close()
 
-    def toggle(self) -> tuple[bool, str]:
+    def toggle(
+        self,
+        start: Callable[[], int],
+        try_only: bool = False,
+    ) -> int:
         """
-        Toggle process state (start if stopped, stop if running).
+        Toggle the managed process under lock.
+
+        If running, stop it. If not running, invoke ``start`` (also under the
+        lock) and return its exit code.
+
+        ``start`` MUST be non-blocking — it runs while the lock is held, so
+        long-running foreground work must NOT use this method. Use
+        :meth:`locked` directly and release the lock before doing the long
+        work.
+
+        Args:
+            start: Callback invoked when no process is running. Must return an
+                exit code and must not block on long-running work.
+            try_only: If True, fail immediately if the lock is held instead of
+                waiting.
 
         Returns:
-            Tuple of (is_now_running, message)
+            Exit code (0 for success). On stop failure returns 1. Raises
+            LockTimeout if the lock cannot be acquired.
         """
-        if not self.acquire_lock():
-            return False, "Another operation is in progress"
-
-        try:
-            is_running, pid = self.is_running()
-
+        with self.locked(try_only=try_only):
+            is_running, _ = self.is_running()
             if is_running:
-                # Stop the process
-                if self.stop_process():
-                    return False, f"Stopped {self.process_name} process"
-                else:
-                    return True, f"Failed to stop {self.process_name} process"
-            else:
-                # Start the process (caller needs to provide command)
-                return True, f"No {self.process_name} process running, starting new one"
-
-        finally:
-            self.release_lock()
+                return 0 if self.stop_process() else 1
+            return start()
 
     def __enter__(self) -> Self:
-        """Context manager entry — raises if the lock cannot be acquired."""
+        """Convenience equivalent to ``with self.locked():`` (no try_only)."""
         if not self.acquire_lock():
-            raise RuntimeError(
+            raise LockTimeout(
                 f"Could not acquire lock for {self.process_name} "
                 f"(another talkat command may be in progress)"
             )

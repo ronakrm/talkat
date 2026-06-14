@@ -179,15 +179,24 @@ class TranscriptionClient:
 
 def _set_stop_event_on_signal(stop_event: threading.Event) -> None:
     """
-    Install signal handlers that only set an Event.
+    Install signal handlers that set an Event and interrupt blocking I/O.
 
     The handler does NO logging or cleanup — Python's logging module isn't
     async-signal-safe and can deadlock if invoked from a handler. The main
     loop observes the event and runs logging/cleanup itself.
+
+    The handler also **raises ``KeyboardInterrupt``** at the end. Without
+    this, PEP 475's auto-retry of EINTR'd syscalls means a SIGINT arriving
+    during a blocking ``httpx.post`` (transcribe call) is silently swallowed
+    and we wait for the full ``http_timeout`` (default 120 s) before noticing
+    the user asked us to stop. Raising from the handler propagates out via
+    Python's standard exception path — async-signal-safe in the same way the
+    interpreter's built-in SIGINT handler is. Callers catch and exit cleanly.
     """
 
     def handler(signum: int, frame: FrameType | None) -> None:
         stop_event.set()
+        raise KeyboardInterrupt()
 
     signal.signal(signal.SIGINT, handler)
     with contextlib.suppress(ValueError):
@@ -210,12 +219,21 @@ def run_calibrate() -> int:
     return 0
 
 
-def listen_once(output_file: str | None = None) -> int:
-    """Record one utterance and either type it (default) or save it to a file."""
+def listen_once(
+    output_file: str | None = None,
+    config_overrides: dict[str, Any] | None = None,
+) -> int:
+    """Record one utterance and either type it (default) or save it to a file.
+
+    The caller (cli.py) is responsible for acquiring the listen process lock,
+    deciding to start vs. stop, and writing this process's PID into the PID
+    file under that lock. We only clean up on exit.
+    """
     config = load_app_config()
+    if config_overrides:
+        config.update(config_overrides)
 
     pm = ProcessManager("listen")
-    pm.write_pid(os.getpid())
 
     stop_event = threading.Event()
     _set_stop_event_on_signal(stop_event)
@@ -294,9 +312,12 @@ def listen_continuous(
     output_file: str | None = None,
     background: bool = False,
     clipboard: bool = True,
+    config_overrides: dict[str, Any] | None = None,
 ) -> int:
     """Run continuous dictation: loop transcribing utterances until interrupted."""
     config = load_app_config()
+    if config_overrides:
+        config.update(config_overrides)
 
     pm = ProcessManager("long_dictation")
     _, existing_pid = pm.is_running()
@@ -339,8 +360,18 @@ def listen_continuous(
             CODE_DEFAULTS["long_mode_max_session_duration"],
         )
     )
+    max_consecutive_errors = int(
+        config.get(
+            "long_mode_max_consecutive_errors",
+            CODE_DEFAULTS["long_mode_max_consecutive_errors"],
+        )
+    )
 
-    full_transcript: list[str] = []
+    # We append each segment straight to disk and never accumulate the full
+    # transcript in memory. The final clipboard copy reads the file back, so
+    # memory stays bounded regardless of session length.
+    session_word_count = 0
+    consecutive_errors = 0
     return_code = 0
     session_start = time.monotonic()
     last_speech_at = session_start
@@ -367,6 +398,7 @@ def listen_continuous(
                         max_duration=silence_timeout,
                         debug=False,
                     )
+                    consecutive_errors = 0
                 except TranscriptionUnreachable as e:
                     logger.error(str(e))
                     _notify("Error: Model server not reachable.")
@@ -376,6 +408,18 @@ def listen_continuous(
                     logger.error(str(e))
                     if stop_event.is_set():
                         break
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error(
+                            f"Aborting long dictation after "
+                            f"{consecutive_errors} consecutive server errors."
+                        )
+                        _notify(
+                            f"Long dictation aborted: "
+                            f"{consecutive_errors} consecutive server errors."
+                        )
+                        return_code = 1
+                        break
                     continue
                 except AudioSessionError as e:
                     logger.error(f"Audio error: {e}")
@@ -384,10 +428,13 @@ def listen_continuous(
 
                 if text:
                     logger.info(f"Recognized: {text}")
-                    full_transcript.append(text)
+                    session_word_count += len(text.split())
                     last_speech_at = time.monotonic()
                     with open(transcript_path, "a", encoding="utf-8") as f:
                         f.write(text + " ")
+    except KeyboardInterrupt:
+        # Raised from our SIGINT/SIGTERM handler to interrupt blocking I/O.
+        logger.info("Long dictation interrupted.")
     except Exception as e:
         logger.error(f"Error in long dictation mode: {e}")
         traceback.print_exc()
@@ -395,9 +442,14 @@ def listen_continuous(
     finally:
         logger.info("Cleaning up long dictation session...")
 
-        full_text = " ".join(full_transcript)
+        try:
+            full_text = transcript_path.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            logger.error(f"Could not read transcript for final summary: {e}")
+            full_text = ""
+
         if full_text:
-            word_count = len(full_text.split())
+            word_count = len(full_text.split()) or session_word_count
             clipboard_ok = clipboard and copy_to_clipboard(full_text)
             if clipboard and not clipboard_ok:
                 logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")

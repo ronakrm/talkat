@@ -1,11 +1,10 @@
 import collections
 import contextlib
 import os
+import sys
 import threading
-import warnings
 from collections.abc import Iterator
 from types import TracebackType
-from typing import Any
 
 import numpy as np
 import pyaudio
@@ -18,25 +17,35 @@ from .security import safe_subprocess_run
 logger = get_logger(__name__)
 
 
-# Suppress ALSA-specific warnings only.
-# These are harmless warnings from the ALSA library that we can't control.
-if os.name == "posix":  # Only on Linux/Unix systems
-    from ctypes import CFUNCTYPE, ArgumentError, c_char_p, c_int, cdll
+@contextlib.contextmanager
+def _suppress_native_stderr() -> Iterator[None]:
+    """Redirect stderr at the fd level to /dev/null for the duration of the block.
 
+    Suppresses noisy messages from ALSA / JACK / PortAudio that go straight to
+    file descriptor 2 from C and bypass Python's logging. This replaces the
+    older ctypes-libasound hack: it works on non-glibc systems (musl), doesn't
+    depend on a specific libasound symbol, and silences JACK + PortAudio noise
+    too. Errors that matter still raise Python exceptions, which are handled
+    by the caller's try/except.
+    """
+    # If the interpreter is running without stderr (e.g. early in a daemonized
+    # process) we have nothing to redirect.
     try:
-        # ALSA error handler signature:
-        # void (*handler)(const char *file, int line, const char *function, int err, const char *fmt, ...)
-        ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+        stderr_fd = sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        yield
+        return
 
-        def py_error_handler(filename: Any, line: Any, function: Any, err: Any, fmt: Any) -> None:
-            pass
-
-        c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
-        asound = cdll.LoadLibrary("libasound.so.2")
-        asound.snd_lib_error_set_handler(c_error_handler)
-    except (OSError, AttributeError, TypeError, ArgumentError):
-        warnings.filterwarnings("ignore", message=".*ALSA.*", category=RuntimeWarning)
-        warnings.filterwarnings("ignore", message=".*jack.*", category=RuntimeWarning)
+    saved_fd = os.dup(stderr_fd)
+    try:
+        with open(os.devnull, "wb") as devnull:
+            os.dup2(devnull.fileno(), stderr_fd)
+            try:
+                yield
+            finally:
+                os.dup2(saved_fd, stderr_fd)
+    finally:
+        os.close(saved_fd)
 
 
 class AudioSessionError(RuntimeError):
@@ -102,20 +111,21 @@ class AudioSession:
         if mic_index is None:
             raise AudioSessionError("No microphone found")
 
-        self._p = pyaudio.PyAudio()
-        try:
-            self._stream = self._p.open(
-                format=self.FORMAT,
-                channels=self.CHANNELS,
-                rate=self.SAMPLE_RATE,
-                input=True,
-                input_device_index=mic_index,
-                frames_per_buffer=self._chunk_samples,
-            )
-        except Exception as e:
-            self._p.terminate()
-            self._p = None
-            raise AudioSessionError(f"Failed to open audio stream: {e}") from e
+        with _suppress_native_stderr():
+            self._p = pyaudio.PyAudio()
+            try:
+                self._stream = self._p.open(
+                    format=self.FORMAT,
+                    channels=self.CHANNELS,
+                    rate=self.SAMPLE_RATE,
+                    input=True,
+                    input_device_index=mic_index,
+                    frames_per_buffer=self._chunk_samples,
+                )
+            except Exception as e:
+                self._p.terminate()
+                self._p = None
+                raise AudioSessionError(f"Failed to open audio stream: {e}") from e
         return self
 
     def __exit__(
@@ -267,23 +277,26 @@ def calibrate_microphone(duration: int = 10) -> float:
             config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
         )
 
-    p = pyaudio.PyAudio()
+    with _suppress_native_stderr():
+        p = pyaudio.PyAudio()
 
-    try:
-        stream = p.open(
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RATE,
-            input=True,
-            input_device_index=mic_index,
-            frames_per_buffer=CHUNK,
-        )
-    except Exception as e:
-        logger.error(f"Error opening audio stream for calibration: {e}")
-        p.terminate()
-        return float(
-            config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
-        )
+        try:
+            stream = p.open(
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                input_device_index=mic_index,
+                frames_per_buffer=CHUNK,
+            )
+        except Exception as e:
+            logger.error(f"Error opening audio stream for calibration: {e}")
+            p.terminate()
+            return float(
+                config.get(
+                    "silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"]
+                )
+            )
 
     volumes: list[float] = []
     chunks_to_read: int = int(duration * RATE / CHUNK)

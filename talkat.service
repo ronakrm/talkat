@@ -16,16 +16,20 @@ Environment=XDG_CONFIG_HOME=%h/.config
 Environment=XDG_CACHE_HOME=%h/.cache
 Environment=XDG_DATA_HOME=%h/.local/share
 
-# Security hardening for user service
+# Security hardening — defence-in-depth for a per-user service.
+# ReadWritePaths punches holes through ProtectHome=read-only for the
+# talkat-owned XDG directories. XDG_RUNTIME_DIR (/run/user/$UID) is
+# outside $HOME so it stays writable without an explicit entry.
+NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
+ProtectHome=read-only
 ReadWritePaths=%h/.cache/talkat %h/.local/share/talkat %h/.config/talkat
-NoNewPrivileges=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

@@ -105,6 +105,36 @@ class ModelService:
         if self.model_type == "vosk" and self.vosk_recognizer:
             self.apply_vosk_dictionary(self.vosk_recognizer)
 
+        self._warm_up()
+
+    def _warm_up(self) -> None:
+        """Run a tiny dummy inference so the first real request hits a hot model.
+
+        Without this, the first transcribe call pays one-time JIT / kernel
+        load costs and can take several seconds even for very short audio.
+        Failures here are non-fatal — the server starts either way.
+        """
+        try:
+            # 0.5s of silence at 16kHz — enough to force a full inference path.
+            dummy = np.zeros(8000, dtype=np.float32)
+
+            if self.model_type == "faster-whisper" and isinstance(self.model, WhisperModel):
+                segments, _ = self.model.transcribe(
+                    dummy, language="en", beam_size=1, vad_filter=False
+                )
+                # Force the generator to run.
+                for _ in segments:
+                    pass
+                logger.info("Faster-whisper model warmed up.")
+            elif self.model_type == "vosk" and self.model is not None:
+                recognizer = vosk.KaldiRecognizer(self.model, 16000)
+                dummy_bytes = (dummy * 32768.0).astype(np.int16).tobytes()
+                recognizer.AcceptWaveform(dummy_bytes)
+                recognizer.FinalResult()
+                logger.info("Vosk model warmed up.")
+        except Exception as e:
+            logger.warning(f"Model warm-up failed: {e}; first request may be slow")
+
     def load_dictionary(self) -> list[str]:
         """Load custom dictionary from configured file path."""
         config = load_app_config()
@@ -161,6 +191,12 @@ class ModelService:
 
 app = Flask(__name__)
 _service = ModelService()
+
+
+@app.errorhandler(413)
+def _request_too_large(_e: Exception) -> ResponseReturnValue:
+    limit_mb = app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024)
+    return jsonify({"error": f"Upload exceeds maximum allowed size of {limit_mb} MB"}), 413
 
 
 @app.route("/transcribe_stream", methods=["POST"])
@@ -455,6 +491,10 @@ def main() -> None:
     _service.initialize()
     config = load_app_config()
     socket_path = Path(config.get("server_socket", CODE_DEFAULTS["server_socket"]))
+
+    max_size_mb = int(config.get("max_upload_size_mb", CODE_DEFAULTS["max_upload_size_mb"]))
+    app.config["MAX_CONTENT_LENGTH"] = max_size_mb * 1024 * 1024
+    logger.info(f"Upload size limit: {max_size_mb} MB")
 
     # Ensure the runtime dir exists and remove any stale socket left over from
     # a previous crash. waitress recreates it on bind.

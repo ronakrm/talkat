@@ -30,12 +30,16 @@ CODE_DEFAULTS: dict[str, Any] = {
     "long_mode_silence_timeout": 60.0,
     # Hard cap on a single long-mode session.
     "long_mode_max_session_duration": 1800.0,  # 30 minutes
+    # Trip the long-mode circuit breaker after this many consecutive server errors.
+    "long_mode_max_consecutive_errors": 5,
     # Server Configuration
     "server_socket": str(SOCKET_FILE),  # Unix domain socket path for the model server
     # Network Timeouts (apply to local unix-socket requests)
     "http_timeout": 120,  # General request timeout (seconds)
     "health_check_timeout": 2,  # Health check timeout (seconds)
     "file_processing_timeout_base": 30,  # Base timeout for file processing (seconds)
+    # Server limits
+    "max_upload_size_mb": 100,  # Reject /transcribe_file uploads larger than this
     # Process Management Timeouts
     "process_stop_timeout": 5.0,  # Max time to wait for process to stop
     "lock_acquire_timeout": 1.0,  # Max time to wait for lock acquisition

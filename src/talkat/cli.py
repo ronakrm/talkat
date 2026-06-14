@@ -7,7 +7,7 @@ import sys
 from .file_processor import batch_process_files, process_audio_file_command
 from .logging_config import get_logger, setup_logging
 from .paths import ensure_user_directories
-from .process_manager import ProcessManager
+from .process_manager import LockTimeout, ProcessManager
 
 logger = get_logger(__name__)
 
@@ -60,44 +60,52 @@ def _stop_long(pm: ProcessManager) -> int:
     return 0 if pm.stop_process() else 1
 
 
-def start_long_background(debug: bool = False) -> int:
+def start_long_background(debug: bool = False, try_only: bool = False) -> int:
     """Start long dictation in background. Refuses if already running."""
     pm = ProcessManager("long_dictation")
     try:
-        with pm:
+        with pm.locked(try_only=try_only):
             if get_long_pid():
                 logger.info("Long dictation is already running.")
                 return 1
             return _start_long(pm, debug)
-    except RuntimeError as e:
+    except LockTimeout as e:
         logger.error(str(e))
         return 1
 
 
-def stop_long_background() -> int:
+def stop_long_background(try_only: bool = False) -> int:
     """Stop the background long-dictation process."""
     pm = ProcessManager("long_dictation")
     try:
-        with pm:
+        with pm.locked(try_only=try_only):
             return _stop_long(pm)
-    except RuntimeError as e:
+    except LockTimeout as e:
         logger.error(str(e))
         return 1
 
 
-def toggle_long_background(debug: bool = False) -> int:
+def toggle_long_background(debug: bool = False, try_only: bool = False) -> int:
     """Toggle long dictation — start if stopped, stop if running."""
     pm = ProcessManager("long_dictation")
     try:
-        with pm:
-            is_running, _ = pm.is_running()
-            return _stop_long(pm) if is_running else _start_long(pm, debug)
-    except RuntimeError as e:
+        return pm.toggle(lambda: _start_long(pm, debug), try_only=try_only)
+    except LockTimeout as e:
         logger.error(str(e))
         return 1
 
 
-def stop_listen_process() -> int:
+def _overrides_from_args(args: argparse.Namespace) -> dict[str, float]:
+    """Collect non-None CLI timeout overrides keyed by their config name."""
+    mapping = {
+        "max_recording_duration": getattr(args, "max_recording", None),
+        "silence_duration": getattr(args, "silence_duration", None),
+        "http_timeout": getattr(args, "http_timeout", None),
+    }
+    return {k: v for k, v in mapping.items() if v is not None}
+
+
+def stop_listen_process(try_only: bool = False) -> int:
     """Stop the running listen process.
 
     The running process emits its own typed/saved/no-text notification when
@@ -105,12 +113,12 @@ def stop_listen_process() -> int:
     """
     pm = ProcessManager("listen")
     try:
-        with pm:
+        with pm.locked(try_only=try_only):
             if pm.stop_process():
                 return 0
             logger.info("No active listen process found.")
             return 1
-    except RuntimeError as e:
+    except LockTimeout as e:
         logger.error(str(e))
         return 1
 
@@ -137,6 +145,30 @@ def main() -> None:
     listen_parser.add_argument(
         "-o", "--output", help="Save transcription to file instead of typing to screen"
     )
+    listen_parser.add_argument(
+        "--try-lock",
+        action="store_true",
+        help="Refuse to toggle/start if another talkat command is in progress or "
+        "a listen is already running (instead of waiting or stopping it).",
+    )
+    listen_parser.add_argument(
+        "--max-recording",
+        type=float,
+        metavar="SECONDS",
+        help="Cap on a single utterance (overrides max_recording_duration).",
+    )
+    listen_parser.add_argument(
+        "--silence-duration",
+        type=float,
+        metavar="SECONDS",
+        help="Seconds of silence before the recording stops " "(overrides silence_duration).",
+    )
+    listen_parser.add_argument(
+        "--http-timeout",
+        type=float,
+        metavar="SECONDS",
+        help="Per-request HTTP timeout against the model server " "(overrides http_timeout).",
+    )
 
     long_parser = subparsers.add_parser(
         "long", help="Start long dictation mode (continuous recording)"
@@ -154,11 +186,41 @@ def main() -> None:
         action="store_true",
         help="Disable clipboard copy when long dictation ends.",
     )
+    long_parser.add_argument(
+        "--silence-duration",
+        type=float,
+        metavar="SECONDS",
+        help="Per-utterance silence cutoff inside the long session "
+        "(overrides silence_duration).",
+    )
+    long_parser.add_argument(
+        "--http-timeout",
+        type=float,
+        metavar="SECONDS",
+        help="Per-request HTTP timeout against the model server " "(overrides http_timeout).",
+    )
 
-    subparsers.add_parser("start-long", help="Start long dictation in background")
-    subparsers.add_parser("stop-long", help="Stop background long dictation")
-    subparsers.add_parser(
+    start_long_parser = subparsers.add_parser(
+        "start-long", help="Start long dictation in background"
+    )
+    start_long_parser.add_argument(
+        "--try-lock",
+        action="store_true",
+        help="Exit immediately if another talkat command holds the lock.",
+    )
+    stop_long_parser = subparsers.add_parser("stop-long", help="Stop background long dictation")
+    stop_long_parser.add_argument(
+        "--try-lock",
+        action="store_true",
+        help="Exit immediately if another talkat command holds the lock.",
+    )
+    toggle_long_parser = subparsers.add_parser(
         "toggle-long", help="Toggle long dictation (start if stopped, stop if running)"
+    )
+    toggle_long_parser.add_argument(
+        "--try-lock",
+        action="store_true",
+        help="Exit immediately if another talkat command holds the lock.",
     )
 
     subparsers.add_parser("server", help="Start the model server")
@@ -207,13 +269,31 @@ def main() -> None:
     setup_logging(verbose=args.verbose or args.debug or env_debug, quiet=args.quiet)
 
     if args.command == "listen":
-        existing_pid = get_listen_pid()
-        if existing_pid:
-            logger.info(f"Stopping active recording (PID: {existing_pid})...")
-            sys.exit(stop_listen_process())
+        pm = ProcessManager("listen")
+        try:
+            with pm.locked(try_only=args.try_lock):
+                is_running, pid = pm.is_running()
+                if is_running:
+                    if args.try_lock:
+                        logger.error(f"talkat listen is already running (PID: {pid}); refusing.")
+                        sys.exit(1)
+                    logger.info(f"Stopping active recording (PID: {pid})...")
+                    sys.exit(0 if pm.stop_process() else 1)
+                # Claim the slot under the lock so a concurrent `talkat listen`
+                # will either toggle us off or refuse to start — never start a
+                # second listen alongside us.
+                pm.write_pid(os.getpid())
+        except LockTimeout as e:
+            logger.error(str(e))
+            sys.exit(1)
         from .main import listen_once
 
-        sys.exit(listen_once(output_file=args.output))
+        sys.exit(
+            listen_once(
+                output_file=args.output,
+                config_overrides=_overrides_from_args(args),
+            )
+        )
     elif args.command == "long":
         from .config import load_app_config
         from .main import listen_continuous
@@ -225,14 +305,15 @@ def main() -> None:
                 output_file=args.output,
                 background=args.background,
                 clipboard=clipboard_enabled,
+                config_overrides=_overrides_from_args(args),
             )
         )
     elif args.command == "start-long":
-        sys.exit(start_long_background(debug=args.debug))
+        sys.exit(start_long_background(debug=args.debug, try_only=args.try_lock))
     elif args.command == "stop-long":
-        sys.exit(stop_long_background())
+        sys.exit(stop_long_background(try_only=args.try_lock))
     elif args.command == "toggle-long":
-        sys.exit(toggle_long_background(debug=args.debug))
+        sys.exit(toggle_long_background(debug=args.debug, try_only=args.try_lock))
     elif args.command == "server":
         from .model_server import main as server_main
 

@@ -33,6 +33,26 @@ def _service_unit(python_exe: str) -> str:
         StandardOutput=journal
         StandardError=journal
 
+        # Sandboxing — defence-in-depth for a per-user service.
+        # ReadWritePaths punches holes through ProtectHome=read-only for the
+        # talkat-owned XDG directories. XDG_RUNTIME_DIR (/run/user/$UID) is
+        # outside $HOME so it stays writable without an explicit entry.
+        NoNewPrivileges=yes
+        PrivateTmp=yes
+        ProtectSystem=strict
+        ProtectHome=read-only
+        ReadWritePaths=%h/.cache/talkat %h/.local/share/talkat %h/.config/talkat
+        ProtectKernelTunables=yes
+        ProtectKernelModules=yes
+        ProtectControlGroups=yes
+        RestrictNamespaces=yes
+        RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+        LockPersonality=yes
+        RestrictRealtime=yes
+        RestrictSUIDSGID=yes
+        # PrivateDevices stays off — we need /dev/snd for microphone capture.
+        PrivateDevices=no
+
         [Install]
         WantedBy=default.target
         """

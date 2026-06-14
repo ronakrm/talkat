@@ -46,6 +46,15 @@ def transcribe_audio_file(
     if file_path_obj.suffix.lower() not in supported_formats:
         raise ValueError(f"Unsupported file format: {file_path_obj.suffix}")
 
+    max_size_mb = int(config.get("max_upload_size_mb", CODE_DEFAULTS["max_upload_size_mb"]))
+    file_size_bytes = file_path_obj.stat().st_size
+    if file_size_bytes > max_size_mb * 1024 * 1024:
+        raise ValueError(
+            f"Audio file is {file_size_bytes / 1024 / 1024:.1f} MB; "
+            f"exceeds the {max_size_mb} MB server limit. "
+            "Raise it via 'max_upload_size_mb' in config.json if needed."
+        )
+
     try:
         import librosa
         import soundfile  # noqa: F401 - test for availability
@@ -85,6 +94,9 @@ def transcribe_audio_file(
                 files = {"audio": (file_path_obj.name, f, "audio/*")}
                 response = client.post("http://talkat/transcribe_file", files=files)
 
+        if response.status_code == 413:
+            logger.error(f"Server rejected upload: {response.json().get('error', 'too large')}")
+            sys.exit(1)
         if response.status_code != 200:
             error_msg = response.json().get("error", "Unknown error")
             logger.error(f"Error transcribing file: {error_msg}")

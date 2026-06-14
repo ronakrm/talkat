@@ -271,3 +271,124 @@ def test_audiosession_raises_when_no_microphone(patched_pyaudio, monkeypatch):
             chunk_size_ms=30,
         ):
             pass
+
+
+# ---------------------------------------------------------------------------
+# calibrate_microphone — same PyAudio stub pattern as AudioSession but
+# different chunk size (default 1024) and no VAD.
+# ---------------------------------------------------------------------------
+
+
+CALIBRATE_CHUNK_SAMPLES = 1024  # default config.audio_chunk_size
+
+
+def _calibrate_chunk(amplitude: int) -> bytes:
+    """A chunk sized for calibrate_microphone's default CHUNK=1024."""
+    return np.full(CALIBRATE_CHUNK_SAMPLES, amplitude, dtype=np.int16).tobytes()
+
+
+@pytest.fixture
+def patched_pyaudio_for_calibrate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[type[FakePyAudio]]:
+    """Same as patched_pyaudio but also silences calibrate's notify-send calls."""
+    from talkat import record as record_mod
+
+    monkeypatch.setattr(record_mod.pyaudio, "PyAudio", FakePyAudio)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda: 0)
+    monkeypatch.setattr(record_mod, "safe_subprocess_run", lambda *_a, **_k: None)
+    yield FakePyAudio
+
+
+def test_calibrate_clamps_pure_silence_to_min_threshold(patched_pyaudio_for_calibrate, capsys):
+    """A perfectly silent stream produces p95=0; result is clamped to silence_threshold_min."""
+    from talkat.config import CODE_DEFAULTS
+    from talkat.record import calibrate_microphone
+
+    patched_pyaudio_for_calibrate._next_chunks = [_calibrate_chunk(0) for _ in range(16)]
+    threshold = calibrate_microphone(duration=1)
+
+    assert threshold == CODE_DEFAULTS["silence_threshold_min"]
+
+
+def test_calibrate_clamps_loud_audio_to_max_threshold(patched_pyaudio_for_calibrate):
+    """A uniformly loud stream produces p95=5000; result is clamped to silence_threshold_max."""
+    from talkat.config import CODE_DEFAULTS
+    from talkat.record import calibrate_microphone
+
+    patched_pyaudio_for_calibrate._next_chunks = [_calibrate_chunk(5000) for _ in range(16)]
+    threshold = calibrate_microphone(duration=1)
+
+    assert threshold == CODE_DEFAULTS["silence_threshold_max"]
+
+
+def test_calibrate_returns_p95_for_typical_noise(patched_pyaudio_for_calibrate):
+    """For a noise profile between the min/max bounds, the returned threshold tracks p95."""
+    from talkat.record import calibrate_microphone
+
+    # 16 chunks at amplitude 400 → RMS volume = 400; p95 = 400, well within
+    # the [50, 5000] clamp window.
+    patched_pyaudio_for_calibrate._next_chunks = [_calibrate_chunk(400) for _ in range(16)]
+    threshold = calibrate_microphone(duration=1)
+
+    assert threshold == pytest.approx(400.0, abs=1.0)
+
+
+def test_calibrate_falls_back_when_no_microphone(monkeypatch: pytest.MonkeyPatch):
+    """No mic → returns silence_threshold_fallback without touching PyAudio."""
+    from talkat import record as record_mod
+    from talkat.config import CODE_DEFAULTS
+    from talkat.record import calibrate_microphone
+
+    monkeypatch.setattr(record_mod, "find_microphone", lambda: None)
+    monkeypatch.setattr(record_mod, "safe_subprocess_run", lambda *_a, **_k: None)
+
+    threshold = calibrate_microphone(duration=1)
+    assert threshold == CODE_DEFAULTS["silence_threshold_fallback"]
+
+
+def test_calibrate_falls_back_when_stream_open_fails(monkeypatch: pytest.MonkeyPatch):
+    """If PyAudio.open raises, calibrate returns the fallback threshold rather than crashing."""
+    from talkat import record as record_mod
+    from talkat.config import CODE_DEFAULTS
+    from talkat.record import calibrate_microphone
+
+    class FailingPyAudio:
+        def __init__(self) -> None:
+            pass
+
+        def open(self, **_kwargs: object) -> None:
+            raise OSError("simulated stream-open failure")
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(record_mod.pyaudio, "PyAudio", FailingPyAudio)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda: 0)
+    monkeypatch.setattr(record_mod, "safe_subprocess_run", lambda *_a, **_k: None)
+
+    threshold = calibrate_microphone(duration=1)
+    assert threshold == CODE_DEFAULTS["silence_threshold_fallback"]
+
+
+def test_calibrate_respects_custom_min_max_from_config(
+    patched_pyaudio_for_calibrate, monkeypatch: pytest.MonkeyPatch
+):
+    """User-configured silence_threshold_min/max must override the defaults."""
+    from talkat import record as record_mod
+    from talkat.record import calibrate_microphone
+
+    custom_cfg = {
+        "audio_chunk_size": 1024,
+        "audio_channels": 1,
+        "audio_sample_rate": 16000,
+        "silence_threshold_min": 100.0,
+        "silence_threshold_max": 1000.0,
+        "silence_threshold_fallback": 500.0,
+    }
+    monkeypatch.setattr(record_mod, "load_app_config", lambda: custom_cfg)
+
+    # 16 silent chunks → p95 = 0 → clamped to custom min (100.0)
+    patched_pyaudio_for_calibrate._next_chunks = [_calibrate_chunk(0) for _ in range(16)]
+    threshold = calibrate_microphone(duration=1)
+    assert threshold == 100.0

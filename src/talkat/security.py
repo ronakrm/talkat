@@ -340,7 +340,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
 _UNSET = object()
 
 
-def safe_subprocess_run(command: list[str], **kwargs) -> Any:
+def safe_subprocess_run(command: list[str], **kwargs: Any) -> Any:
     """
     Safely run a subprocess command with validation.
 

@@ -8,8 +8,10 @@ import subprocess
 import threading
 import time
 import traceback
+from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
+from types import FrameType, TracebackType
 from typing import Any
 
 import httpx
@@ -115,7 +117,12 @@ class TranscriptionClient:
     def __enter__(self) -> "TranscriptionClient":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def transcribe_one_utterance(
@@ -141,7 +148,7 @@ class TranscriptionClient:
         ) as session:
             metadata = {"rate": session.sample_rate}
 
-            def body():
+            def body() -> Generator[bytes, None, None]:
                 yield json.dumps(metadata).encode("utf-8") + b"\n"
                 for chunk in session:
                     if chunk:
@@ -179,7 +186,7 @@ def _set_stop_event_on_signal(stop_event: threading.Event) -> None:
     loop observes the event and runs logging/cleanup itself.
     """
 
-    def handler(signum, frame):
+    def handler(signum: int, frame: FrameType | None) -> None:
         stop_event.set()
 
     signal.signal(signal.SIGINT, handler)

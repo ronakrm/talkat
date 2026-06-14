@@ -5,7 +5,7 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def list_audio_devices():
+def list_audio_devices() -> None:
     """List all available audio devices"""
     p = pyaudio.PyAudio()
     logger.info("\nAvailable audio devices:")

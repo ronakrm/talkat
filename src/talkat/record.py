@@ -4,6 +4,8 @@ import os
 import threading
 import warnings
 from collections.abc import Iterator
+from types import TracebackType
+from typing import Any
 
 import numpy as np
 import pyaudio
@@ -26,7 +28,7 @@ if os.name == "posix":  # Only on Linux/Unix systems
         # void (*handler)(const char *file, int line, const char *function, int err, const char *fmt, ...)
         ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
 
-        def py_error_handler(filename, line, function, err, fmt):
+        def py_error_handler(filename: Any, line: Any, function: Any, err: Any, fmt: Any) -> None:
             pass
 
         c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
@@ -116,7 +118,12 @@ class AudioSession:
             raise AudioSessionError(f"Failed to open audio stream: {e}") from e
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         if self._stream is not None:
             with contextlib.suppress(Exception):
                 self._stream.stop_stream()

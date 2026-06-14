@@ -51,7 +51,7 @@ SYSTEM_DATA_DIR = Path("/usr/share") / APP_NAME
 SYSTEM_LIB_DIR = Path("/usr/lib") / APP_NAME
 
 
-def ensure_user_directories():
+def ensure_user_directories() -> None:
     """Create all necessary user directories."""
     dirs = [
         CONFIG_DIR,

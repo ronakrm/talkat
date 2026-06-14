@@ -175,6 +175,7 @@ cython_debug/
 
 # makepkg build artifacts (Arch packaging)
 src/*/
+!src/talkat/
 pkg/
 *.pkg.tar*
 *.tar.gz

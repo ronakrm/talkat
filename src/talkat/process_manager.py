@@ -5,7 +5,10 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
+from types import FrameType, TracebackType
+from typing import Self
 
 from .logging_config import get_logger
 from .paths import LOCK_DIR, LOG_DIR, PID_DIR
@@ -303,7 +306,7 @@ class ProcessManager:
         finally:
             self.release_lock()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """Context manager entry — raises if the lock cannot be acquired."""
         if not self.acquire_lock():
             raise RuntimeError(
@@ -312,12 +315,17 @@ class ProcessManager:
             )
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit."""
         self.release_lock()
 
 
-def setup_signal_handlers(cleanup_func=None):
+def setup_signal_handlers(cleanup_func: Callable[[], None] | None = None) -> None:
     """
     Set up proper signal handlers for graceful shutdown.
 
@@ -325,7 +333,7 @@ def setup_signal_handlers(cleanup_func=None):
         cleanup_func: Optional cleanup function to call on shutdown
     """
 
-    def signal_handler(signum, frame):
+    def signal_handler(signum: int, frame: FrameType | None) -> None:
         logger.info(f"Received signal {signum}, shutting down gracefully")
         if cleanup_func:
             cleanup_func()

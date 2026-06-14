@@ -57,6 +57,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+talkat = ["py.typed"]
+
 # Ruff configuration
 [tool.ruff]
 target-version = "py311"
@@ -99,7 +102,7 @@ known-first-party = ["talkat"]
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
-disallow_untyped_defs = false  # Start lenient, will make stricter
+disallow_untyped_defs = true
 check_untyped_defs = true
 ignore_missing_imports = true
 no_implicit_optional = true

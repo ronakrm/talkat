@@ -85,7 +85,7 @@ def load_app_config() -> dict[str, Any]:
     return config
 
 
-def save_app_config(config_dict: dict[str, Any]):
+def save_app_config(config_dict: dict[str, Any]) -> None:
     """Saves the application configuration to a JSON file."""
     from .security import validate_json_config
 

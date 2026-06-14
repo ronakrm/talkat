@@ -10,6 +10,7 @@ import numpy as np
 import vosk
 from faster_whisper import WhisperModel
 from flask import Flask, jsonify, request
+from flask.typing import ResponseReturnValue
 from waitress import serve
 
 from talkat.config import CODE_DEFAULTS, load_app_config
@@ -163,7 +164,7 @@ _service = ModelService()
 
 
 @app.route("/transcribe_stream", methods=["POST"])
-def transcribe_audio_stream():
+def transcribe_audio_stream() -> ResponseReturnValue:
     if not _service.model:
         return jsonify({"error": "Model not loaded"}), 500
 
@@ -250,7 +251,7 @@ def transcribe_audio_stream():
 
 
 @app.route("/transcribe_file", methods=["POST"])
-def transcribe_file():
+def transcribe_file() -> ResponseReturnValue:
     """
     Transcribe an uploaded audio file.
 
@@ -366,7 +367,7 @@ def transcribe_file():
 
 
 @app.route("/health", methods=["GET"])
-def health_check():
+def health_check() -> ResponseReturnValue:
     if _service.model:
         return jsonify(
             {"status": "ok", "model_type": _service.model_type, "message": "Model loaded"}
@@ -376,7 +377,7 @@ def health_check():
 
 
 @app.route("/dictionary", methods=["GET"])
-def get_dictionary():
+def get_dictionary() -> ResponseReturnValue:
     """Get current custom dictionary."""
     return jsonify(
         {"words": _service.dictionary_words, "count": len(_service.dictionary_words)}
@@ -384,7 +385,7 @@ def get_dictionary():
 
 
 @app.route("/dictionary", methods=["POST"])
-def update_dictionary():
+def update_dictionary() -> ResponseReturnValue:
     """
     Update custom dictionary from uploaded text file.
 
@@ -450,7 +451,7 @@ def update_dictionary():
         return jsonify({"error": f"Failed to update dictionary: {str(e)}"}), 500
 
 
-def main():
+def main() -> None:
     _service.initialize()
     config = load_app_config()
     socket_path = Path(config.get("server_socket", CODE_DEFAULTS["server_socket"]))

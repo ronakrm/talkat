@@ -21,15 +21,19 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y portaudio19-dev libsndfile1
+          sudo apt-get install -y \
+            portaudio19-dev libsndfile1 \
+            pkg-config \
+            libavformat-dev libavcodec-dev libavdevice-dev \
+            libavutil-dev libavfilter-dev libswscale-dev libswresample-dev
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -44,10 +48,10 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
@@ -61,15 +65,19 @@ jobs:
     name: typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y portaudio19-dev libsndfile1
+          sudo apt-get install -y \
+            portaudio19-dev libsndfile1 \
+            pkg-config \
+            libavformat-dev libavcodec-dev libavdevice-dev \
+            libavutil-dev libavfilter-dev libswscale-dev libswresample-dev
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
           enable-cache: true

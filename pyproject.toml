@@ -136,8 +136,7 @@ filterwarnings = [
 [tool.coverage.run]
 source = ["src/talkat"]
 omit = [
-    "src/talkat/cli.py",          # argparse glue; handlers themselves are covered
-    "src/talkat/model_server.py", # needs real ASR model; covered by integration tests in §3
+    "src/talkat/model_server.py", # needs real ASR model; flask-test-client coverage is a follow-up
     "src/talkat/logging_config.py",
     "src/talkat/devices.py",      # touches real PortAudio device enumeration
 ]

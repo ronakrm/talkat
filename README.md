@@ -1,5 +1,10 @@
 # Talkat
 
+[![CI](https://github.com/ronakrm/talkat/actions/workflows/ci.yml/badge.svg)](https://github.com/ronakrm/talkat/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/ronakrm/talkat/graph/badge.svg)](https://codecov.io/gh/ronakrm/talkat)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A voice command system with local model server for privacy and offline use. Talkat allows you to speak into any keyboard input in a Wayland-based compositor, similar to nerd-dictation but with a simpler setup.
 
 ## ⚠️ Work in Progress

@@ -38,7 +38,17 @@ jobs:
         run: uv sync
 
       - name: Run tests
-        run: uv run pytest --cov=talkat --cov-report=term
+        run: uv run pytest --cov=talkat --cov-report=term --cov-report=xml
+
+      # Upload coverage from one matrix leg only — Codecov merges multiple
+      # uploads but there's no benefit when both runs cover the same lines.
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+        continue-on-error: true
 
   lint:
     name: lint

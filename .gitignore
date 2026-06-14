@@ -183,3 +183,6 @@ pkg/
 *.src.tar.gz
 
 # Keep PKGBUILD and .SRCINFO for dev ease
+
+# Local audio samples / notes — user data, not source
+data/

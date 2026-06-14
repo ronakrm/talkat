@@ -479,3 +479,44 @@ def test_stop_process_no_op_when_no_pid_file(clean_pid_files):
     pm = ProcessManager("test")
     assert pm.stop_process(timeout=0.1) is True
     assert not pm.pid_file.exists()
+
+
+def test_stop_process_signals_child_and_cleans_up(clean_pid_files):
+    """stop_process() must SIGINT the running child, wait for exit, and remove the PID file.
+
+    We spawn a small Python child whose argv contains the string "talkat" so
+    is_running()'s cmdline check accepts it. Python's default SIGINT handler
+    raises KeyboardInterrupt, terminating the sleep cleanly.
+    """
+    pm = ProcessManager("test")
+
+    # The argv suffix ensures /proc/<pid>/cmdline contains "talkat" so
+    # is_running() treats this child as one of ours.
+    proc = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            "import time; time.sleep(30)",
+            "talkat-stop-process-test-marker",
+        ]
+    )
+    try:
+        pm.write_pid(proc.pid)
+
+        running, pid = pm.is_running()
+        assert running is True
+        assert pid == proc.pid
+
+        # SIGINT → KeyboardInterrupt in Python → exit. Allow up to 3s.
+        assert pm.stop_process(timeout=3.0) is True
+
+        # Child must actually be dead.
+        proc.wait(timeout=2)
+        assert proc.poll() is not None
+
+        # PID file cleaned up by stop_process on success.
+        assert not pm.pid_file.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)

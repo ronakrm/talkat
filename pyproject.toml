@@ -122,3 +122,30 @@ module = [
     "waitress.*"
 ]
 ignore_missing_imports = true
+
+# Pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # librosa pulls in audioread which is noisy on Python 3.12; not our problem to fix.
+    "ignore::DeprecationWarning:audioread.*",
+]
+
+# Coverage configuration — opt-in via `pytest --cov=talkat` (CI already does this).
+# We omit entry points and modules that need a real model/audio device to exercise.
+[tool.coverage.run]
+source = ["src/talkat"]
+omit = [
+    "src/talkat/cli.py",          # argparse glue; handlers themselves are covered
+    "src/talkat/model_server.py", # needs real ASR model; covered by integration tests in §3
+    "src/talkat/logging_config.py",
+    "src/talkat/devices.py",      # touches real PortAudio device enumeration
+]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

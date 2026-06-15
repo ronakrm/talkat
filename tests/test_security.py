@@ -1,9 +1,13 @@
 """Tests for talkat.security — sanitize / validate / command-safety helpers."""
 
+import subprocess as _subprocess_module
+from unittest.mock import MagicMock
+
 import pytest
 
 from talkat.security import (
     SecurityError,
+    safe_subprocess_run,
     sanitize_text_for_clipboard,
     sanitize_text_for_typing,
     validate_audio_params,
@@ -269,3 +273,167 @@ def test_validate_audio_params_rejects_chunk_out_of_range():
         validate_audio_params(16000, 1, 128)  # below min 256
     with pytest.raises(ValueError):
         validate_audio_params(16000, 1, 16384)  # above max 8192
+
+
+# ---------------------------------------------------------------------------
+# safe_subprocess_run
+# ---------------------------------------------------------------------------
+#
+# safe_subprocess_run is the single subprocess gateway used by every
+# ydotool / wl-copy / xclip / notify-send call. A bug here silently
+# affects clipboard, typing, and notifications. These tests pin down:
+#
+#   - the 30s default timeout (so callers don't hang forever)
+#   - timeout=None pass-through (typing a long transcript opts in)
+#   - shell=False is non-negotiable (no shell injection from sanitize-bypass)
+#   - kwargs allowlist filters unknown/dangerous kwargs (env, cwd, …)
+#   - validate_command runs BEFORE subprocess.run (defence in depth)
+#   - TimeoutExpired and FileNotFoundError propagate (callers catch them)
+
+
+def _patch_subprocess_run(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Patch subprocess.run to a recording mock and return the mock."""
+    fake = MagicMock(name="subprocess.run")
+    fake.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+    monkeypatch.setattr(_subprocess_module, "run", fake)
+    return fake
+
+
+def test_safe_subprocess_run_default_timeout_is_30s(monkeypatch: pytest.MonkeyPatch):
+    """When no timeout is passed, safe_subprocess_run must default to 30s."""
+    fake = _patch_subprocess_run(monkeypatch)
+    safe_subprocess_run(["ydotool", "type", "hi"])
+    args, kwargs = fake.call_args
+    assert args[0] == ["ydotool", "type", "hi"]
+    assert kwargs["timeout"] == 30
+
+
+def test_safe_subprocess_run_explicit_timeout_passed_through(monkeypatch: pytest.MonkeyPatch):
+    """A custom integer timeout is forwarded verbatim."""
+    fake = _patch_subprocess_run(monkeypatch)
+    safe_subprocess_run(["ydotool", "type", "hi"], timeout=5)
+    _args, kwargs = fake.call_args
+    assert kwargs["timeout"] == 5
+
+
+def test_safe_subprocess_run_explicit_None_timeout_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Passing timeout=None must disable the default — required by typing-long-text.
+
+    ``listen_once`` passes ``timeout=None`` for ``ydotool type --key-delay=1``
+    because a long transcript can take well over 30s. If the default kicked in
+    here, dictation of long passages would silently get truncated.
+    """
+    fake = _patch_subprocess_run(monkeypatch)
+    safe_subprocess_run(["ydotool", "type", "very long text"], timeout=None)
+    _args, kwargs = fake.call_args
+    assert kwargs["timeout"] is None
+
+
+def test_safe_subprocess_run_shell_kwarg_is_forced_off(monkeypatch: pytest.MonkeyPatch):
+    """No caller-supplied shell=True can reach subprocess.run."""
+    fake = _patch_subprocess_run(monkeypatch)
+    # Try to sneak shell=True past the filter — the function must override it.
+    safe_subprocess_run(["ydotool", "type", "hi"], shell=True)  # type: ignore[call-arg]
+    _args, kwargs = fake.call_args
+    assert kwargs["shell"] is False
+
+
+def test_safe_subprocess_run_drops_disallowed_kwargs(monkeypatch: pytest.MonkeyPatch):
+    """env, cwd, etc. are NOT in the allowlist and must be filtered out."""
+    fake = _patch_subprocess_run(monkeypatch)
+    safe_subprocess_run(
+        ["ydotool", "type", "hi"],
+        env={"HACK": "1"},  # type: ignore[call-arg]
+        cwd="/etc",  # type: ignore[call-arg]
+    )
+    _args, kwargs = fake.call_args
+    assert "env" not in kwargs
+    assert "cwd" not in kwargs
+
+
+def test_safe_subprocess_run_forwards_allowed_kwargs(monkeypatch: pytest.MonkeyPatch):
+    """input, capture_output, text, encoding, stdout, stderr are in the allowlist."""
+    fake = _patch_subprocess_run(monkeypatch)
+    safe_subprocess_run(
+        ["ydotool", "type", "hi"],
+        input=b"stdin data",
+        capture_output=True,
+        text=False,
+        encoding="utf-8",
+    )
+    _args, kwargs = fake.call_args
+    assert kwargs["input"] == b"stdin data"
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is False
+    assert kwargs["encoding"] == "utf-8"
+
+
+def test_safe_subprocess_run_check_defaults_to_false(monkeypatch: pytest.MonkeyPatch):
+    """check defaults to False — callers that want raise-on-nonzero must opt in.
+
+    A naive default of check=True would change semantics for every caller
+    that currently relies on inspecting returncode.
+    """
+    fake = _patch_subprocess_run(monkeypatch)
+    safe_subprocess_run(["ydotool", "type", "hi"])
+    _args, kwargs = fake.call_args
+    assert kwargs["check"] is False
+
+
+def test_safe_subprocess_run_check_can_be_overridden(monkeypatch: pytest.MonkeyPatch):
+    """Callers (e.g. copy_to_clipboard) opt in to check=True for raise-on-nonzero."""
+    fake = _patch_subprocess_run(monkeypatch)
+    safe_subprocess_run(["ydotool", "type", "hi"], check=True)
+    _args, kwargs = fake.call_args
+    assert kwargs["check"] is True
+
+
+def test_safe_subprocess_run_rejects_shell_metacharacters_before_running(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """validate_command must run before subprocess.run — dangerous chars never spawn.
+
+    If a metacharacter slips into the args, validate_command raises
+    SecurityError and subprocess.run is never invoked. This is the defence-
+    in-depth check: even if sanitize_text_for_typing missed something,
+    safe_subprocess_run won't execute it.
+    """
+    fake = _patch_subprocess_run(monkeypatch)
+    with pytest.raises(SecurityError):
+        safe_subprocess_run(["ydotool", "type", "evil; rm -rf /"])
+    fake.assert_not_called()
+
+
+def test_safe_subprocess_run_reraises_TimeoutExpired(monkeypatch: pytest.MonkeyPatch):
+    """A subprocess timeout must surface as TimeoutExpired (not swallowed)."""
+    fake = MagicMock(side_effect=_subprocess_module.TimeoutExpired(cmd=["ydotool"], timeout=1))
+    monkeypatch.setattr(_subprocess_module, "run", fake)
+
+    with pytest.raises(_subprocess_module.TimeoutExpired):
+        safe_subprocess_run(["ydotool", "type", "hi"], timeout=1)
+
+
+def test_safe_subprocess_run_reraises_FileNotFoundError(monkeypatch: pytest.MonkeyPatch):
+    """If the binary doesn't exist, FileNotFoundError must propagate.
+
+    copy_to_clipboard relies on this to fall back from wl-copy to xclip.
+    """
+    fake = MagicMock(side_effect=FileNotFoundError(2, "No such file"))
+    monkeypatch.setattr(_subprocess_module, "run", fake)
+
+    with pytest.raises(FileNotFoundError):
+        safe_subprocess_run(["nonexistent-binary"])
+
+
+def test_safe_subprocess_run_returns_completed_process_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Successful path returns subprocess.run's return value unchanged."""
+    expected = MagicMock(returncode=0, stdout=b"hello", stderr=b"")
+    fake = MagicMock(return_value=expected)
+    monkeypatch.setattr(_subprocess_module, "run", fake)
+
+    result = safe_subprocess_run(["ydotool", "type", "hi"])
+    assert result is expected

@@ -8,7 +8,9 @@ consecutive-error circuit breaker, and the on-disk transcript invariant
 
 import signal
 import threading
+import time as time_mod
 from collections.abc import Iterator
+from itertools import chain, repeat
 from pathlib import Path
 
 import pytest
@@ -319,3 +321,127 @@ def test_transcribe_call_uses_silence_timeout_as_max_duration(
     assert fake.calls
     for call in fake.calls:
         assert call["max_duration"] == 7.5
+
+
+# ---------------------------------------------------------------------------
+# Time-limit branches — safety invariants
+# ---------------------------------------------------------------------------
+#
+# These two tests pin down the "session can't run unbounded" guarantee.
+# listen_continuous reads two ceilings from config:
+#
+#   long_mode_max_session_duration — hard wall-clock cap per session
+#   long_mode_silence_timeout      — auto-stop if no speech for N seconds
+#
+# Both are checked at the top of each loop iteration. If either trips the
+# loop breaks cleanly with rc=0. We drive time.monotonic through a fake
+# clock so we can assert the branches actually fire without waiting in
+# real time. Without these tests, a regression that swaps a "<" for a ">"
+# (or drops a check entirely) would silently let dictation run forever.
+
+
+def _fake_clock(values: list[float]):
+    """Build a monotonic() stub that walks ``values`` then repeats the last one.
+
+    Returning the last value forever (instead of StopIteration) is defensive:
+    if listen_continuous adds another time.monotonic call later, the test
+    won't crash — it just won't assert on the new call. The branch under
+    test is still exercised via the values we did supply.
+    """
+    it = chain(iter(values), repeat(values[-1]))
+    return lambda: next(it)
+
+
+def test_max_session_duration_break_stops_the_loop(
+    clean_pid_files, patched_long_mode, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Crossing long_mode_max_session_duration must break the loop cleanly.
+
+    Sequence of time.monotonic() calls in listen_continuous:
+      1. session_start             (before loop)
+      2. now, iter 1               (top of loop)
+      3. last_speech_at, iter 1    (after non-empty transcribe)
+      4. now, iter 2               (top of loop — MUST trip max here)
+
+    With max=5 and silence=1000, iter 1 sees now=1 and proceeds. After
+    "hello" lands, last_speech_at=2. Iter 2 sees now=999 — 999 > 5, so the
+    max-session branch breaks before transcribe is even attempted. The
+    queued "should not be reached" event must remain un-consumed.
+    """
+    from talkat import main as main_mod
+    from talkat.main import listen_continuous
+
+    monkeypatch.setattr(time_mod, "monotonic", _fake_clock([0.0, 1.0, 2.0, 999.0]))
+
+    def factory(config: dict) -> FakeTranscriber:
+        fake = FakeTranscriber(config)
+        fake.events = ["hello", "should not be reached"]
+        patched_long_mode["fake"] = fake
+        return fake
+
+    main_mod.TranscriptionClient = factory  # type: ignore[attr-defined]
+
+    output = tmp_path / "transcript.txt"
+    rc = listen_continuous(
+        output_file=str(output),
+        background=False,
+        clipboard=False,
+        config_overrides={
+            "long_mode_max_session_duration": 5.0,
+            "long_mode_silence_timeout": 1000.0,
+        },
+    )
+
+    assert rc == 0, "max_session_duration break is a clean exit, not an error"
+    fake = patched_long_mode["fake"]
+    assert len(fake.calls) == 1, "loop must break on iter 2 before transcribing again"
+    assert fake.events == [
+        "should not be reached"
+    ], "queued event must remain un-consumed when max-session break fires"
+
+
+def test_silence_timeout_break_stops_the_loop(
+    clean_pid_files, patched_long_mode, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """No speech for silence_timeout seconds must break the loop cleanly.
+
+    With silence_timeout=5 and max=1000:
+      1. session_start = 0
+      2. now (iter 1) = 1                   → 1 < 5 silence, 1 < 1000 max → proceed
+      3. transcribe returns "" (silence)    → last_speech_at NOT updated
+      4. now (iter 2) = 10                  → 10-0 = 10 > 5 silence → BREAK
+
+    Empty results don't update last_speech_at (only ``if text:`` does), so
+    the silence countdown is from session_start. This branch is what auto-
+    stops dictation when the user walks away.
+    """
+    from talkat import main as main_mod
+    from talkat.main import listen_continuous
+
+    monkeypatch.setattr(time_mod, "monotonic", _fake_clock([0.0, 1.0, 10.0]))
+
+    def factory(config: dict) -> FakeTranscriber:
+        fake = FakeTranscriber(config)
+        fake.events = ["", "should not be reached"]
+        patched_long_mode["fake"] = fake
+        return fake
+
+    main_mod.TranscriptionClient = factory  # type: ignore[attr-defined]
+
+    output = tmp_path / "transcript.txt"
+    rc = listen_continuous(
+        output_file=str(output),
+        background=False,
+        clipboard=False,
+        config_overrides={
+            "long_mode_max_session_duration": 1000.0,
+            "long_mode_silence_timeout": 5.0,
+        },
+    )
+
+    assert rc == 0, "silence_timeout break is a clean exit, not an error"
+    fake = patched_long_mode["fake"]
+    assert len(fake.calls) == 1, "loop must break on iter 2 before transcribing again"
+    assert fake.events == [
+        "should not be reached"
+    ], "queued event must remain un-consumed when silence-timeout break fires"

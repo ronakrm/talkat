@@ -6,6 +6,7 @@ and is heavily coupled to how the OS exposes the test runner's argv.
 """
 
 import os
+import signal
 import subprocess
 import time
 
@@ -520,3 +521,196 @@ def test_stop_process_signals_child_and_cleans_up(clean_pid_files):
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# stop_process — signal escalation chain
+# ---------------------------------------------------------------------------
+#
+# stop_process escalates SIGINT → SIGTERM → SIGKILL when a child won't
+# stop. The escalation is the "won't stop" recovery path — if the SIGINT
+# arm is the only one tested, a regression that breaks SIGTERM or SIGKILL
+# would only surface when a real child actually misbehaves. These two
+# tests spawn children that explicitly ignore the earlier signals so we
+# can prove each arm of the chain reaches the child.
+
+
+_SIGNAL_NAMES = {signal.SIGINT: "SIGINT", signal.SIGTERM: "SIGTERM"}
+
+
+def _spawn_signal_ignoring_child(ignore_signals: list[int], marker: str) -> subprocess.Popen:
+    """Spawn a python child that installs SIG_IGN for ``ignore_signals`` then sleeps.
+
+    The marker suffix lives in argv so /proc/<pid>/cmdline contains
+    "talkat" — that's the gate is_running() uses to decide the PID is ours.
+
+    We sleep for 0.5s after Popen so the child has time to import signal
+    and install the handlers BEFORE stop_process starts sending signals.
+    Without this, a fast CI can race the child's startup and have SIGINT
+    arrive before the SIG_IGN handler is installed — which would let
+    SIGINT kill the child during interpreter startup and make the test
+    falsely "pass" the wrong escalation arm.
+    """
+    sig_setup = "; ".join(
+        f"signal.signal(signal.{_SIGNAL_NAMES[sig]}, signal.SIG_IGN)" for sig in ignore_signals
+    )
+    code = f"import signal, time; {sig_setup}; time.sleep(30)"
+    proc = subprocess.Popen(["python3", "-c", code, marker])
+    time.sleep(0.5)
+    return proc
+
+
+def test_stop_process_escalates_to_SIGTERM_when_SIGINT_ignored(clean_pid_files):
+    """A child that ignores SIGINT must be killed by SIGTERM escalation.
+
+    Verifies the second arm of stop_process's chain. The child ignores
+    SIGINT, so the SIGINT poll loop times out and SIGTERM is sent. SIGTERM
+    has no installed handler in the child (default action is terminate),
+    so the child dies with returncode -SIGTERM (-15). The PID file must
+    be cleaned up on the way out.
+    """
+    pm = ProcessManager("test")
+    proc = _spawn_signal_ignoring_child(
+        [signal.SIGINT],
+        "talkat-stop-sigterm-test-marker",
+    )
+    try:
+        pm.write_pid(proc.pid)
+        running, pid = pm.is_running()
+        assert running is True
+        assert pid == proc.pid
+
+        # Short SIGINT timeout — escalate quickly so the test doesn't drag.
+        assert pm.stop_process(timeout=0.3) is True
+
+        # Confirm the child actually died via SIGTERM (returncode -15).
+        proc.wait(timeout=3)
+        assert (
+            proc.returncode == -signal.SIGTERM
+        ), f"expected SIGTERM kill (-{signal.SIGTERM}), got {proc.returncode}"
+        assert not pm.pid_file.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_stop_process_escalates_to_SIGKILL_when_SIGINT_and_SIGTERM_ignored(clean_pid_files):
+    """A child that ignores SIGINT AND SIGTERM must be killed by SIGKILL.
+
+    Final arm of the escalation chain — the absolute fallback. SIGKILL
+    can't be caught or ignored by anything in userspace, so this branch
+    is what guarantees stop_process always wins eventually. Returncode is
+    -9 (SIGKILL).
+    """
+    pm = ProcessManager("test")
+    proc = _spawn_signal_ignoring_child(
+        [signal.SIGINT, signal.SIGTERM],
+        "talkat-stop-sigkill-test-marker",
+    )
+    try:
+        pm.write_pid(proc.pid)
+        running, pid = pm.is_running()
+        assert running is True
+        assert pid == proc.pid
+
+        assert pm.stop_process(timeout=0.3) is True
+
+        proc.wait(timeout=3)
+        assert (
+            proc.returncode == -signal.SIGKILL
+        ), f"expected SIGKILL (-{signal.SIGKILL}), got {proc.returncode}"
+        assert not pm.pid_file.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# stop_process — graceful ProcessLookupError exit paths
+# ---------------------------------------------------------------------------
+#
+# These two tests cover the "child died and was fully reaped before our
+# next kill(pid, 0) check" branches. Real-child tests can't hit them: a
+# subprocess.Popen child becomes a zombie when it exits, and zombies
+# still answer kill(pid, 0) with success — so ProcessLookupError never
+# raises until the parent reaps it. In production these branches DO fire
+# (the systemd unit and start_new_session children get reaped by init or
+# the service supervisor concurrently with talkat's check), so we mock
+# os.kill to simulate that timing deterministically.
+
+
+def test_stop_process_returns_immediately_when_sigint_reaps_child(
+    clean_pid_files, monkeypatch: pytest.MonkeyPatch
+):
+    """The graceful-stop branch — SIGINT works and the child is gone on next check.
+
+    Covers lines 251-255 (the ProcessLookupError exit from the SIGINT
+    poll loop). When the production child is killed by SIGINT and reaped
+    by init before our 0.1s recheck, kill(pid, 0) raises
+    ProcessLookupError and stop_process returns True without escalating.
+    """
+    pm = ProcessManager("test")
+    pm.write_pid(99999)
+    monkeypatch.setattr(pm, "is_running", lambda: (True, 99999))
+
+    signals_sent: list[int] = []
+
+    def fake_kill(_pid: int, sig: int) -> None:
+        signals_sent.append(sig)
+        # After SIGINT, the next kill(pid, 0) probe pretends the child has
+        # been reaped — that's the branch we want to exercise.
+        if sig == 0 and signal.SIGINT in signals_sent:
+            raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+    # Skip the 0.1s recheck sleep so the test runs at full speed.
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    assert pm.stop_process(timeout=0.5) is True
+
+    assert signals_sent[0] == signal.SIGINT, "SIGINT must be the first signal sent"
+    # No escalation should have occurred.
+    assert signal.SIGTERM not in signals_sent, "SIGTERM must NOT be sent after graceful SIGINT"
+    assert signal.SIGKILL not in signals_sent, "SIGKILL must NOT be sent after graceful SIGINT"
+    assert not pm.pid_file.exists(), "PID file must be cleaned up"
+
+
+def test_stop_process_skips_sigkill_when_sigterm_reaps_child(
+    clean_pid_files, monkeypatch: pytest.MonkeyPatch
+):
+    """SIGTERM works (no SIGKILL needed) — covers the PLE branch after SIGTERM.
+
+    Covers lines 272-273 (the ProcessLookupError pass after the SIGTERM
+    wait). When SIGINT is ignored but SIGTERM lands cleanly and the
+    child is reaped before the 1s post-SIGTERM check, stop_process
+    must NOT escalate to SIGKILL.
+    """
+    pm = ProcessManager("test")
+    pm.write_pid(99999)
+    monkeypatch.setattr(pm, "is_running", lambda: (True, 99999))
+
+    signals_sent: list[int] = []
+
+    def fake_kill(_pid: int, sig: int) -> None:
+        signals_sent.append(sig)
+        if sig != 0:
+            return  # record the signal send, child still "alive" until SIGTERM
+        # kill(pid, 0) probe: alive until SIGTERM has been sent.
+        if signal.SIGTERM in signals_sent:
+            raise ProcessLookupError(3, "No such process")
+        # Otherwise still alive (SIGINT loop keeps spinning until timeout).
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    # Tiny timeout to escalate fast — SIGINT loop must give up so SIGTERM is sent.
+    assert pm.stop_process(timeout=0.05) is True
+
+    assert signal.SIGINT in signals_sent
+    assert signal.SIGTERM in signals_sent
+    assert (
+        signal.SIGKILL not in signals_sent
+    ), "SIGKILL must NOT be sent when SIGTERM successfully kills the child"
+    assert not pm.pid_file.exists()

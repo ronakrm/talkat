@@ -28,6 +28,21 @@ from flask import Flask, jsonify, request
 from waitress.server import create_server
 
 # ---------------------------------------------------------------------------
+# Autouse: silence _notify
+# ---------------------------------------------------------------------------
+#
+# postprocess._notify shells out to notify-send on every fail-open path.
+# Without this fixture, running ``pytest`` fires ~9 real desktop toasts
+# (one per failure-path test). Patching at module level keeps the noise
+# contained to tests that explicitly opt back in.
+
+
+@pytest.fixture(autouse=True)
+def _silence_notify(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("talkat.postprocess._notify", lambda _msg: None)
+
+
+# ---------------------------------------------------------------------------
 # FakeClient — drop-in replacement for httpx.Client for unit tests
 # ---------------------------------------------------------------------------
 

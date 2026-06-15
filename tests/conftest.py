@@ -36,6 +36,46 @@ def _cleanup_session_tmp() -> None:
 
 import pytest  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# Live AIPP test opt-in (§5a follow-up)
+# ---------------------------------------------------------------------------
+#
+# Tests decorated with @pytest.mark.aipp_live are skipped by default. They
+# hit a real OpenAI-compatible backend (Ollama, llama.cpp server, etc.) and
+# need a server already running and a model already pulled. Run them with:
+#
+#     uv run pytest --aipp-live
+#
+# Configure via env vars (defaults match a fresh Ollama install):
+#     OLLAMA_BASE_URL  http://localhost:11434/v1
+#     OLLAMA_MODEL     qwen2.5:0.5b
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--aipp-live",
+        action="store_true",
+        default=False,
+        help="Run AIPP tests that require a live Ollama-compatible backend.",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "aipp_live: requires a live OpenAI-compatible backend (e.g. Ollama). "
+        "Off by default; pass --aipp-live to enable.",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--aipp-live"):
+        return
+    skip_live = pytest.mark.skip(reason="needs --aipp-live (set up a local backend first)")
+    for item in items:
+        if "aipp_live" in item.keywords:
+            item.add_marker(skip_live)
+
 
 @pytest.fixture
 def clean_config_file():

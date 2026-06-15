@@ -94,3 +94,74 @@ jobs:
 
       - name: Mypy
         run: uv run mypy src/
+
+  # ---------------------------------------------------------------------------
+  # Live AIPP tests against a real Ollama backend.
+  #
+  # The mocked tests in test_postprocess.py cover validation, fail-open
+  # semantics, and shape parsing. This job adds a final layer: prove our
+  # request format matches what a real OpenAI-compatible server accepts
+  # and that our response parser handles the actual JSON Ollama emits.
+  #
+  # Model: qwen2.5:0.5b — ~400 MB, fast on CPU, cached across runs.
+  # Bump OLLAMA_MODEL_CACHE_KEY to invalidate the cache if the model
+  # changes or if a model release breaks something.
+  # ---------------------------------------------------------------------------
+  aipp-live:
+    name: aipp-live (Ollama)
+    runs-on: ubuntu-latest
+    env:
+      OLLAMA_MODEL: qwen2.5:0.5b
+      OLLAMA_MODEL_CACHE_KEY: ollama-qwen2.5-0.5b-v1
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev libsndfile1
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Cache Ollama model files
+        id: ollama-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ${{ env.OLLAMA_MODEL_CACHE_KEY }}
+
+      - name: Start Ollama
+        run: |
+          # The installer registers a systemd service on most images; if it
+          # isn't running (containerized runners), fall back to a background
+          # process. Either way we just need :11434 listening.
+          if ! systemctl is-active --quiet ollama 2>/dev/null; then
+            nohup ollama serve > /tmp/ollama.log 2>&1 &
+          fi
+          # Wait for the server to be ready (max 30s).
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+              echo "Ollama is up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Ollama failed to start within 30s; log follows:"
+          cat /tmp/ollama.log || true
+          exit 1
+
+      - name: Pull model (no-op if cached)
+        run: ollama pull "$OLLAMA_MODEL"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install talkat
+        run: uv sync
+
+      - name: Run live AIPP tests
+        run: uv run pytest --aipp-live -k aipp_live -v

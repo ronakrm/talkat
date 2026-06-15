@@ -364,6 +364,27 @@ processed result is written alongside the raw transcript as
 `<timestamp>_long.processed.txt` and copied to the clipboard. The raw file
 is kept as the source of truth.
 
+#### Verifying AIPP against a real backend
+
+The mocked tests cover validation and fail-open semantics; for a final
+smoke test against a real OpenAI-compatible server (Ollama, llama.cpp,
+LM Studio, OpenRouter, …), use the `--aipp-live` opt-in:
+
+```bash
+# One-time setup (any OpenAI-compat server works; Ollama is the easiest)
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:0.5b      # ~400 MB, CPU-fast
+
+# Run only the live tests
+uv run pytest --aipp-live -k aipp_live -v
+```
+
+The `aipp_live`-marked tests skip by default and skip cleanly with a
+friendly message if the backend isn't reachable. Override the defaults
+with `OLLAMA_BASE_URL` / `OLLAMA_MODEL` env vars to point at a different
+server. CI runs these on every push against a freshly-installed Ollama
+(see `.github/workflows/ci.yml::aipp-live`).
+
 ### Transcript Features
 - All transcripts (both short and long mode) are saved to `~/.local/share/talkat/transcripts/`
 - Short mode: saves as `YYYYMMDD_HHMMSS_short.txt`

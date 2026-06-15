@@ -79,7 +79,7 @@ class ProcessManager:
                 if time.monotonic() - start_time >= timeout:
                     if timeout > 0:
                         logger.warning(
-                            f"Failed to acquire lock for {self.process_name} " f"within {timeout}s"
+                            f"Failed to acquire lock for {self.process_name} within {timeout}s"
                         )
                     with contextlib.suppress(OSError):
                         os.close(self._lock_fd)

@@ -245,6 +245,7 @@ Example configuration:
     "silence_threshold": 100.0,
     "model_type": "faster-whisper",
     "model_name": "small.en",
+    "language": "en",
     "save_transcripts": true,
     "clipboard_on_long": true,
     "long_mode_silence_timeout": 60.0,
@@ -252,6 +253,28 @@ Example configuration:
     "transcript_dir": "~/.local/share/talkat/transcripts"
 }
 ```
+
+### Language
+
+Talkat uses Whisper's language hint to pick the decoder for a given utterance.
+Set it in the config file or override per-invocation with `--language`:
+
+```bash
+talkat listen --language es           # transcribe a Spanish utterance
+talkat long --language fr             # long-mode dictation in French
+talkat file input.wav --language de   # transcribe a German audio file
+```
+
+Use `"auto"` to have faster-whisper detect the language per utterance.
+
+Notes:
+- Vosk ignores `language` — Vosk language is baked into the model file, so
+  pick a different Vosk model (e.g. `vosk-model-small-fr`) instead.
+- Whisper's English-only variants (`*.en` models) are tuned for English and
+  ignore the hint too. For multilingual use, pick the multilingual variant
+  (e.g. `small` instead of `small.en`).
+- The CLI flag overrides the config file for a single invocation. Server
+  uses its own configured default when the client sends no value.
 
 The model server listens on a unix socket at
 `$XDG_RUNTIME_DIR/talkat/server.sock` (permissions `0600`) — local-only by

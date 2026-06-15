@@ -321,11 +321,13 @@ def test_main_file_dispatches_to_process_audio_file_command(
         output_file: str | None = None,
         output_format: str = "text",
         clipboard: bool = False,
+        language: str | None = None,
     ) -> int:
         captured["file"] = file_path
         captured["output"] = output_file
         captured["format"] = output_format
         captured["clipboard"] = clipboard
+        captured["language"] = language
         return 0
 
     monkeypatch.setattr(cli_mod, "process_audio_file_command", fake_handler)
@@ -344,6 +346,7 @@ def test_main_file_dispatches_to_process_audio_file_command(
         "output": str(out),
         "format": "json",
         "clipboard": True,
+        "language": None,
     }
 
 
@@ -353,11 +356,15 @@ def test_main_batch_dispatches_to_batch_process_files(monkeypatch: pytest.Monkey
     captured: dict = {}
 
     def fake_handler(
-        files: list[str], output_dir: str | None = None, output_format: str = "text"
+        files: list[str],
+        output_dir: str | None = None,
+        output_format: str = "text",
+        language: str | None = None,
     ) -> int:
         captured["files"] = files
         captured["dir"] = output_dir
         captured["format"] = output_format
+        captured["language"] = language
         return 0
 
     monkeypatch.setattr(cli_mod, "batch_process_files", fake_handler)
@@ -375,6 +382,7 @@ def test_main_batch_dispatches_to_batch_process_files(monkeypatch: pytest.Monkey
     assert captured["files"] == [str(a), str(b)]
     assert captured["dir"] == str(tmp_path)
     assert captured["format"] == "srt"
+    assert captured["language"] is None
 
 
 def test_main_start_long_dispatches_to_start_long_background(

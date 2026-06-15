@@ -56,6 +56,9 @@ CODE_DEFAULTS: dict[str, Any] = {
     "vosk_model_base_dir": str(VOSK_CACHE_DIR),
     "model_cache_dir": str(FASTER_WHISPER_CACHE_DIR.parent),
     "device": "cpu",  # cpu, cuda, auto - defaulting to CPU for compatibility
+    # Language passed to the ASR backend. "auto" → autodetect (faster-whisper);
+    # Vosk ignores this (language is baked into the loaded model).
+    "language": "en",
     # Application Features
     "clipboard_on_long": True,
     "save_transcripts": True,

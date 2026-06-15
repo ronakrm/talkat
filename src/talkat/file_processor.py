@@ -18,7 +18,10 @@ def _make_client(socket_path: str, timeout: float) -> httpx.Client:
 
 
 def transcribe_audio_file(
-    file_path: str, socket_path: str | None = None, output_format: str = "text"
+    file_path: str,
+    socket_path: str | None = None,
+    output_format: str = "text",
+    language: str | None = None,
 ) -> tuple[str, float]:
     """
     Transcribe an audio file by uploading it to the model server.
@@ -27,6 +30,8 @@ def transcribe_audio_file(
         file_path: Path to the audio file
         socket_path: Unix socket path of the model server (uses config default if None)
         output_format: Output format (text, json, srt, vtt)
+        language: ASR language code (e.g. "en", "es", "auto"). When None,
+            the server applies its configured default.
 
     Returns:
         Tuple of (transcription, duration in seconds)
@@ -37,6 +42,8 @@ def transcribe_audio_file(
 
     if socket_path is None:
         socket_path = config.get("server_socket", CODE_DEFAULTS["server_socket"])
+    if language is None:
+        language = config.get("language")
 
     try:
         file_path_obj = validate_file_path(file_path, must_exist=True)
@@ -93,7 +100,8 @@ def transcribe_audio_file(
 
             with open(file_path_obj, "rb") as f:
                 files = {"audio": (file_path_obj.name, f, "audio/*")}
-                response = client.post("http://talkat/transcribe_file", files=files)
+                data = {"language": language} if language else None
+                response = client.post("http://talkat/transcribe_file", files=files, data=data)
 
         if response.status_code == 413:
             logger.error(f"Server rejected upload: {response.json().get('error', 'too large')}")
@@ -174,6 +182,7 @@ def process_audio_file_command(
     output_file: str | None = None,
     output_format: str = "text",
     clipboard: bool = False,
+    language: str | None = None,
 ) -> int:
     """
     Process an audio file and output the transcription.
@@ -183,13 +192,14 @@ def process_audio_file_command(
         output_file: Optional output file path
         output_format: Output format (text, json, srt, vtt)
         clipboard: Whether to copy to clipboard
+        language: ASR language code; None defers to config default
 
     Returns:
         Exit code (0 for success, 1 for error)
     """
     try:
         # Transcribe the file
-        transcription, duration = transcribe_audio_file(file_path)
+        transcription, duration = transcribe_audio_file(file_path, language=language)
 
         if not transcription:
             logger.warning("No speech detected in the audio file")
@@ -228,7 +238,10 @@ def process_audio_file_command(
 
 
 def batch_process_files(
-    file_paths: list[str], output_dir: str | None = None, output_format: str = "text"
+    file_paths: list[str],
+    output_dir: str | None = None,
+    output_format: str = "text",
+    language: str | None = None,
 ) -> int:
     """
     Process multiple audio files in batch.
@@ -237,6 +250,7 @@ def batch_process_files(
         file_paths: List of audio file paths
         output_dir: Optional output directory
         output_format: Output format for transcriptions
+        language: ASR language code; None defers to config default
 
     Returns:
         Exit code (0 for success, 1 for error)
@@ -255,7 +269,7 @@ def batch_process_files(
         logger.info("-" * 40)
 
         try:
-            transcription, duration = transcribe_audio_file(file_path_str)
+            transcription, duration = transcribe_audio_file(file_path_str, language=language)
 
             if transcription:
                 formatted_output = format_output(transcription, duration, output_format)

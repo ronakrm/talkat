@@ -135,9 +135,13 @@ class FasterWhisperBackend:
         if len(audio) == 0:
             return ""
 
+        # faster-whisper uses ``language=None`` for autodetect. We accept
+        # the ``"auto"`` token from upstream config / CLI as the Protocol
+        # surface stays string-typed.
+        fw_language = None if language == "auto" else language
         segments, _info = self._model.transcribe(
             audio,
-            language=language,
+            language=fw_language,
             beam_size=5,
             best_of=5,
             vad_filter=True,
@@ -233,4 +237,4 @@ def create_backend(model_type: str) -> TranscriptionBackend:
         return FasterWhisperBackend()
     if model_type == "vosk":
         return VoskBackend()
-    raise ValueError(f"Unknown model_type: {model_type!r}. " "Known: 'faster-whisper', 'vosk'.")
+    raise ValueError(f"Unknown model_type: {model_type!r}. Known: 'faster-whisper', 'vosk'.")

@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+from typing import Any
 
 from .file_processor import batch_process_files, process_audio_file_command
 from .logging_config import get_logger, setup_logging
@@ -95,12 +96,13 @@ def toggle_long_background(debug: bool = False, try_only: bool = False) -> int:
         return 1
 
 
-def _overrides_from_args(args: argparse.Namespace) -> dict[str, float]:
-    """Collect non-None CLI timeout overrides keyed by their config name."""
-    mapping = {
+def _overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect non-None CLI config overrides keyed by their config name."""
+    mapping: dict[str, Any] = {
         "max_recording_duration": getattr(args, "max_recording", None),
         "silence_duration": getattr(args, "silence_duration", None),
         "http_timeout": getattr(args, "http_timeout", None),
+        "language": getattr(args, "language", None),
     }
     return {k: v for k, v in mapping.items() if v is not None}
 
@@ -161,13 +163,19 @@ def main() -> None:
         "--silence-duration",
         type=float,
         metavar="SECONDS",
-        help="Seconds of silence before the recording stops " "(overrides silence_duration).",
+        help="Seconds of silence before the recording stops (overrides silence_duration).",
     )
     listen_parser.add_argument(
         "--http-timeout",
         type=float,
         metavar="SECONDS",
-        help="Per-request HTTP timeout against the model server " "(overrides http_timeout).",
+        help="Per-request HTTP timeout against the model server (overrides http_timeout).",
+    )
+    listen_parser.add_argument(
+        "--language",
+        type=str,
+        metavar="CODE",
+        help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
     )
 
     long_parser = subparsers.add_parser(
@@ -190,14 +198,19 @@ def main() -> None:
         "--silence-duration",
         type=float,
         metavar="SECONDS",
-        help="Per-utterance silence cutoff inside the long session "
-        "(overrides silence_duration).",
+        help="Per-utterance silence cutoff inside the long session (overrides silence_duration).",
     )
     long_parser.add_argument(
         "--http-timeout",
         type=float,
         metavar="SECONDS",
-        help="Per-request HTTP timeout against the model server " "(overrides http_timeout).",
+        help="Per-request HTTP timeout against the model server (overrides http_timeout).",
+    )
+    long_parser.add_argument(
+        "--language",
+        type=str,
+        metavar="CODE",
+        help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
     )
 
     start_long_parser = subparsers.add_parser(
@@ -248,6 +261,12 @@ def main() -> None:
     file_parser.add_argument(
         "-c", "--clipboard", action="store_true", help="Copy transcription to clipboard"
     )
+    file_parser.add_argument(
+        "--language",
+        type=str,
+        metavar="CODE",
+        help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
+    )
 
     batch_parser = subparsers.add_parser("batch", help="Process multiple audio files")
     batch_parser.add_argument("files", nargs="+", help="Audio files to process")
@@ -258,6 +277,12 @@ def main() -> None:
         choices=["text", "json", "srt", "vtt"],
         default="text",
         help="Output format (default: text)",
+    )
+    batch_parser.add_argument(
+        "--language",
+        type=str,
+        metavar="CODE",
+        help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
     )
 
     args = parser.parse_args()
@@ -331,9 +356,24 @@ def main() -> None:
 
         sys.exit(uninstall_service())
     elif args.command == "file":
-        sys.exit(process_audio_file_command(args.input, args.output, args.format, args.clipboard))
+        sys.exit(
+            process_audio_file_command(
+                args.input,
+                args.output,
+                args.format,
+                args.clipboard,
+                language=args.language,
+            )
+        )
     elif args.command == "batch":
-        sys.exit(batch_process_files(args.files, args.output_dir, args.format))
+        sys.exit(
+            batch_process_files(
+                args.files,
+                args.output_dir,
+                args.format,
+                language=args.language,
+            )
+        )
     else:
         parser.print_help()
         sys.exit(1)

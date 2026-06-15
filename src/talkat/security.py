@@ -114,6 +114,29 @@ def validate_model_name(model_name: str) -> str:
     return model_name
 
 
+def validate_language(language: str) -> str:
+    """Validate an ASR language code.
+
+    Accepts:
+        - ``"auto"`` — special token meaning autodetect (faster-whisper).
+        - 2- or 3-letter ISO-639 codes (``"en"``, ``"zh"``, ``"yue"``).
+
+    We don't gate on a hand-curated language list — faster-whisper supports
+    ~100 languages and that set will grow. The regex catches obvious garbage
+    + DoS-via-huge-string, which is what config validation is here for.
+    """
+    if not isinstance(language, str):
+        raise ValueError(f"language must be a string, got {type(language).__name__}")
+    if language == "auto":
+        return language
+    if not re.match(r"^[a-z]{2,3}$", language):
+        raise ValueError(
+            f"Invalid language code: {language!r}. "
+            "Expected a 2- or 3-letter ISO-639 code (e.g. 'en', 'es', 'yue') or 'auto'."
+        )
+    return language
+
+
 def validate_command(command: list[str]) -> list[str]:
     """
     Validate a command for subprocess execution.
@@ -325,6 +348,9 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
     for param, choices in choice_params.items():
         if param in config and config[param] not in choices:
             raise ValueError(f"{param} must be one of {choices}, got {config[param]}")
+
+    if "language" in config:
+        config["language"] = validate_language(config["language"])
 
     # Bounded free-form strings — guard against accidental DoS via huge values.
     string_max_len: dict[str, int] = {}

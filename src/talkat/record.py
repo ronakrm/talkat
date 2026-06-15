@@ -313,7 +313,7 @@ def calibrate_microphone(duration: int = 10) -> float:
             filled = int(bar_length * progress)
             bar = "█" * filled + "░" * (bar_length - filled)
             print(
-                f"\rProgress: [{bar}] {progress*100:.0f}% | Current: {volume:6.1f}",
+                f"\rProgress: [{bar}] {progress * 100:.0f}% | Current: {volume:6.1f}",
                 end="",
                 flush=True,
             )

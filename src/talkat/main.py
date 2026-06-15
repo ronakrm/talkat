@@ -84,6 +84,10 @@ class TranscriptionClient:
         self.silence_duration: float = float(
             config.get("silence_duration", CODE_DEFAULTS["silence_duration"])
         )
+        # Per-request language override sent in the stream metadata. The
+        # server has its own config default; we only send this if the client
+        # has one configured, so an older server build still works.
+        self.language: str | None = config.get("language")
         transport = httpx.HTTPTransport(uds=self.socket_path)
         self._client = httpx.Client(transport=transport, timeout=self.http_timeout)
 
@@ -122,7 +126,9 @@ class TranscriptionClient:
             stop_event=stop_event,
             debug=debug,
         ) as session:
-            metadata = {"rate": session.sample_rate}
+            metadata: dict[str, Any] = {"rate": session.sample_rate}
+            if self.language:
+                metadata["language"] = self.language
 
             def body() -> Generator[bytes, None, None]:
                 yield json.dumps(metadata).encode("utf-8") + b"\n"

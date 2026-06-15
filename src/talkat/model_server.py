@@ -13,6 +13,7 @@ from waitress import serve
 from talkat.backends import BackendLoadError, TranscriptionBackend, create_backend
 from talkat.config import CODE_DEFAULTS, load_app_config
 from talkat.logging_config import get_logger
+from talkat.security import validate_language
 
 try:
     import librosa
@@ -37,6 +38,9 @@ class ModelService:
         self.backend: TranscriptionBackend | None = None
         self.model_type: str | None = None
         self.dictionary_words: list[str] = []
+        # Server-side fallback when a request omits language. Per-request
+        # values from /transcribe_stream and /transcribe_file override this.
+        self.default_language: str = CODE_DEFAULTS["language"]
 
     def initialize(self) -> None:
         logger.info("Initializing model for the server...")
@@ -48,6 +52,7 @@ class ModelService:
         model_type: str = config.get("model_type", CODE_DEFAULTS["model_type"])
         self.model_type = model_type
         model_name = config.get("model_name", CODE_DEFAULTS["model_name"])
+        self.default_language = str(config.get("language", CODE_DEFAULTS["language"]))
 
         try:
             self.backend = create_backend(model_type)
@@ -123,6 +128,20 @@ app = Flask(__name__)
 _service = ModelService()
 
 
+def _resolve_language(raw: object) -> str:
+    """Pick the language for a single request.
+
+    Per-request value (from metadata / form field) wins over the server-side
+    default. We re-validate even though the client already did — never trust
+    the wire. Raises ValueError on malformed input.
+    """
+    if raw is None or raw == "":
+        return _service.default_language
+    if not isinstance(raw, str):
+        raise ValueError(f"language must be a string, got {type(raw).__name__}")
+    return validate_language(raw)
+
+
 @app.errorhandler(413)
 def _request_too_large(_e: Exception) -> ResponseReturnValue:
     limit_mb = app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024)
@@ -148,6 +167,11 @@ def transcribe_audio_stream() -> ResponseReturnValue:
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             return jsonify({"error": f"Invalid or missing metadata: {e}"}), 400
 
+        try:
+            language = _resolve_language(metadata.get("language"))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
         audio_buffer = bytearray()
         try:
             while True:
@@ -166,7 +190,9 @@ def transcribe_audio_stream() -> ResponseReturnValue:
         audio_np = np.ascontiguousarray(audio_np, dtype=np.float32)
 
         text_result = _service.backend.transcribe(
-            audio_np, initial_prompt=_service.get_initial_prompt()
+            audio_np,
+            language=language,
+            initial_prompt=_service.get_initial_prompt(),
         )
         return jsonify({"text": text_result})
 
@@ -205,6 +231,11 @@ def transcribe_file() -> ResponseReturnValue:
         return jsonify({"error": "Empty filename"}), 400
 
     try:
+        language = _resolve_language(request.form.get("language"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
         logger.info(f"Received file for transcription: {audio_file.filename}")
 
         # librosa can't read FileStorage directly, so persist to a temp file first.
@@ -225,7 +256,9 @@ def transcribe_file() -> ResponseReturnValue:
                 pass
 
         text_result = _service.backend.transcribe(
-            audio_data, initial_prompt=_service.get_initial_prompt()
+            audio_data,
+            language=language,
+            initial_prompt=_service.get_initial_prompt(),
         )
 
         logger.info(f"Transcription result: {len(text_result)} characters")

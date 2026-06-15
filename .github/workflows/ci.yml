@@ -19,7 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # 3.11 + 3.12: still common on Ubuntu LTS (22.04, 24.04).
+        # 3.13: Debian 13 trixie + Fedora 41/42 default.
+        # 3.14: Arch default. Both 3.10 + 3.11 EOL 2026-10-31 — bump floor then.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v5
 

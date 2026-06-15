@@ -4,15 +4,13 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any
 
 import numpy as np
-import vosk
-from faster_whisper import WhisperModel
 from flask import Flask, jsonify, request
 from flask.typing import ResponseReturnValue
 from waitress import serve
 
+from talkat.backends import BackendLoadError, TranscriptionBackend, create_backend
 from talkat.config import CODE_DEFAULTS, load_app_config
 from talkat.logging_config import get_logger
 
@@ -28,110 +26,56 @@ logger = get_logger(__name__)
 
 
 class ModelService:
+    """Server-side orchestration around a single ``TranscriptionBackend``.
+
+    Holds the loaded backend, the dictionary state, and the model_type for
+    introspection. All ASR work is delegated to ``self.backend.transcribe``;
+    this class doesn't know about Whisper or Vosk specifics — backends do.
+    """
+
     def __init__(self) -> None:
-        self.model: Any = None
+        self.backend: TranscriptionBackend | None = None
         self.model_type: str | None = None
-        self.vosk_recognizer: Any = None
         self.dictionary_words: list[str] = []
 
     def initialize(self) -> None:
         logger.info("Initializing model for the server...")
 
         config = load_app_config()
-        self.model_type = config.get("model_type", CODE_DEFAULTS["model_type"])
+        # Local var first so mypy sees a concrete str at the create_backend
+        # call; self.model_type stays str | None to preserve the "not loaded"
+        # sentinel for callers that introspect post-construction.
+        model_type: str = config.get("model_type", CODE_DEFAULTS["model_type"])
+        self.model_type = model_type
         model_name = config.get("model_name", CODE_DEFAULTS["model_name"])
 
-        model_cache_dir = config.get("faster_whisper_model_cache_dir")
-        fw_device = config.get("fw_device", CODE_DEFAULTS["fw_device"])
-        fw_compute_type = config.get("fw_compute_type", CODE_DEFAULTS["fw_compute_type"])
-        fw_device_index = config.get("fw_device_index", CODE_DEFAULTS["fw_device_index"])
-
-        vosk_model_base_dir = config.get(
-            "vosk_model_base_dir", CODE_DEFAULTS["vosk_model_base_dir"]
-        )
-
-        if self.model_type == "vosk":
-            if vosk is None:
-                logger.error("Vosk library is not installed. Cannot load Vosk model.")
-                sys.exit(1)
-
-            vosk_model_full_path = os.path.join(os.path.expanduser(vosk_model_base_dir), model_name)
-            if not os.path.exists(vosk_model_full_path):
-                logger.error(
-                    f"Vosk model not found at {vosk_model_full_path}. Server cannot start."
-                )
-                sys.exit(1)
-
-            logger.info(f"Loading Vosk model: {vosk_model_full_path}...")
-            self.model = vosk.Model(vosk_model_full_path)
-            # Sentinel recognizer used as an "init happened" guard; actual transcription
-            # uses per-request recognizers for thread safety.
-            self.vosk_recognizer = vosk.KaldiRecognizer(self.model, 16000)
-            logger.info("Vosk model loaded.")
-
-        elif self.model_type == "faster-whisper":
-            if WhisperModel is None or np is None:
-                logger.error(
-                    "faster-whisper or numpy is not installed. Cannot load faster-whisper model."
-                )
-                sys.exit(1)
-
-            logger.info(f"Loading faster-whisper model: {model_name}...")
-            model_kwargs: dict[str, Any] = {
-                "device": fw_device,
-                "compute_type": fw_compute_type,
-                "device_index": fw_device_index,
-            }
-            if model_cache_dir:
-                logger.info(f"Using model cache directory: {model_cache_dir}")
-                model_kwargs["download_root"] = model_cache_dir
-            else:
-                logger.info("Using default model cache directory for faster-whisper.")
-
-            try:
-                self.model = WhisperModel(model_name, **model_kwargs)
-                logger.info(f"Faster-whisper model '{model_name}' loaded.")
-            except Exception as e:
-                logger.error(f"Error loading faster-whisper model '{model_name}': {e}")
-                sys.exit(1)
-        else:
-            logger.error(
-                f"Unsupported model type in config: {self.model_type}. Server cannot start."
-            )
+        try:
+            self.backend = create_backend(model_type)
+        except ValueError as e:
+            logger.error(str(e))
             sys.exit(1)
 
+        logger.info(f"Loading {self.backend.name} model: {model_name}")
+        try:
+            self.backend.load(config)
+        except BackendLoadError as e:
+            logger.error(str(e))
+            sys.exit(1)
+        logger.info(f"{self.backend.name} model loaded.")
+
         self.load_dictionary()
-
-        if self.model_type == "vosk" and self.vosk_recognizer:
-            self.apply_vosk_dictionary(self.vosk_recognizer)
-
         self._warm_up()
 
     def _warm_up(self) -> None:
         """Run a tiny dummy inference so the first real request hits a hot model.
 
-        Without this, the first transcribe call pays one-time JIT / kernel
-        load costs and can take several seconds even for very short audio.
-        Failures here are non-fatal — the server starts either way.
+        Failures are non-fatal — the server should keep accepting requests.
         """
+        if self.backend is None:
+            return
         try:
-            # 0.5s of silence at 16kHz — enough to force a full inference path.
-            dummy = np.zeros(8000, dtype=np.float32)
-
-            if self.model_type == "faster-whisper" and isinstance(self.model, WhisperModel):
-                segments, _ = self.model.transcribe(
-                    dummy, language="en", beam_size=1, vad_filter=False
-                )
-                # Force the generator to run.
-                for _ in segments:
-                    pass
-                logger.info("Faster-whisper model warmed up.")
-            elif self.model_type == "vosk" and self.model is not None:
-                recognizer = vosk.KaldiRecognizer(self.model, 16000)
-                dummy_bytes = (dummy * 32768.0).astype(np.int16).tobytes()
-                recognizer.AcceptWaveform(dummy_bytes)
-                recognizer.FinalResult()
-                logger.info("Vosk model warmed up.")
+            self.backend.warm_up()
+            logger.info(f"{self.backend.name} model warmed up.")
         except Exception as e:
             logger.warning(f"Model warm-up failed: {e}; first request may be slow")
 
@@ -165,28 +109,14 @@ class ModelService:
             return []
 
     def get_initial_prompt(self) -> str | None:
-        """Build initial_prompt for faster-whisper from dictionary words."""
+        """Build initial_prompt for faster-whisper from dictionary words.
+
+        Vosk ignores ``initial_prompt`` (see VoskBackend.transcribe). Other
+        future backends decide for themselves what to do with this hint.
+        """
         if not self.dictionary_words:
             return None
         return ", ".join(self.dictionary_words)
-
-    def apply_vosk_dictionary(self, recognizer: Any) -> None:
-        """
-        Apply dictionary to Vosk recognizer.
-
-        Vosk's KaldiRecognizer uses the vocabulary from the loaded model and
-        doesn't have direct support for vocabulary hints like Whisper's
-        initial_prompt. SetGrammar() requires a JSON grammar format. For now
-        this just logs that the dictionary is loaded but not applied.
-        """
-        if not self.dictionary_words:
-            return
-
-        logger.debug(
-            f"Dictionary loaded with {len(self.dictionary_words)} words. "
-            "Note: Vosk has limited dictionary support. "
-            "Consider using faster-whisper for better custom vocabulary recognition."
-        )
 
 
 app = Flask(__name__)
@@ -201,7 +131,7 @@ def _request_too_large(_e: Exception) -> ResponseReturnValue:
 
 @app.route("/transcribe_stream", methods=["POST"])
 def transcribe_audio_stream() -> ResponseReturnValue:
-    if not _service.model:
+    if _service.backend is None:
         return jsonify({"error": "Model not loaded"}), 500
 
     try:
@@ -210,74 +140,34 @@ def transcribe_audio_stream() -> ResponseReturnValue:
             return jsonify({"error": "Missing metadata line in stream"}), 400
 
         try:
-            metadata_str = metadata_line.decode("utf-8").strip()
-            metadata = json.loads(metadata_str)
-            rate = int(metadata["rate"])
+            metadata = json.loads(metadata_line.decode("utf-8").strip())
+            # ``rate`` parsed but currently fixed at 16 kHz throughout the
+            # client; we still validate the field exists so a malformed
+            # client gets a clear 400 rather than a transcribe failure.
+            int(metadata["rate"])
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             return jsonify({"error": f"Invalid or missing metadata: {e}"}), 400
 
-        text_result = ""
-
-        if _service.model_type == "vosk":
-            if vosk is None:
-                return jsonify({"error": "Vosk library not available"}), 500
-
-            local_vosk_recognizer = vosk.KaldiRecognizer(_service.model, rate)
-
+        audio_buffer = bytearray()
+        try:
             while True:
                 chunk = request.stream.read(4096)
                 if not chunk:
                     break
-                if local_vosk_recognizer.AcceptWaveform(chunk):
-                    pass
+                audio_buffer.extend(chunk)
+        except (OSError, ValueError) as e:
+            logger.warning(f"Client disconnected during streaming: {e}")
+            return jsonify({"error": "Client disconnected"}), 499
 
-            final_json = local_vosk_recognizer.Result()
-            result_dict = json.loads(final_json)
-            text_result = result_dict.get("text", "").strip()
+        if not audio_buffer:
+            return jsonify({"text": ""})
 
-        elif _service.model_type == "faster-whisper":
-            if not isinstance(_service.model, WhisperModel):
-                return jsonify({"error": "Faster-whisper model not correctly loaded"}), 500
+        audio_np = np.frombuffer(bytes(audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
+        audio_np = np.ascontiguousarray(audio_np, dtype=np.float32)
 
-            audio_buffer = bytearray()
-            try:
-                while True:
-                    chunk = request.stream.read(4096)
-                    if not chunk:
-                        break
-                    audio_buffer.extend(chunk)
-            except (OSError, ValueError) as e:
-                logger.warning(f"Client disconnected during streaming: {e}")
-                return jsonify({"error": "Client disconnected"}), 499
-
-            audio_bytes = bytes(audio_buffer)
-
-            if not audio_bytes:
-                text_result = ""
-            else:
-                audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-                audio_np = np.ascontiguousarray(audio_np, dtype=np.float32)
-
-                initial_prompt = _service.get_initial_prompt()
-                segments, info = _service.model.transcribe(
-                    audio_np,
-                    language="en",
-                    beam_size=5,
-                    best_of=5,
-                    vad_filter=True,
-                    initial_prompt=initial_prompt,
-                )
-                logger.debug(
-                    f"Streamed: Detected language '{info.language}' "
-                    f"with probability {info.language_probability:.2f}"
-                )
-                recognized_texts = [segment.text for segment in segments]
-                text_result = "".join(recognized_texts).strip()
-        else:
-            return jsonify(
-                {"error": f"Unsupported model type configured on server: {_service.model_type}"}
-            ), 500
-
+        text_result = _service.backend.transcribe(
+            audio_np, initial_prompt=_service.get_initial_prompt()
+        )
         return jsonify({"text": text_result})
 
     except Exception as e:
@@ -288,15 +178,14 @@ def transcribe_audio_stream() -> ResponseReturnValue:
 
 @app.route("/transcribe_file", methods=["POST"])
 def transcribe_file() -> ResponseReturnValue:
-    """
-    Transcribe an uploaded audio file.
+    """Transcribe an uploaded audio file.
 
-    Accepts multipart/form-data with an 'audio' file field.
-    Supports various audio formats (wav, mp3, flac, ogg, m4a, etc.)
+    Accepts multipart/form-data with an 'audio' file field. Various audio
+    formats (wav, mp3, flac, ogg, m4a, …) — librosa handles decoding.
 
     Returns JSON: {"text": transcription}
     """
-    if not _service.model:
+    if _service.backend is None:
         return jsonify({"error": "Model not loaded"}), 500
 
     if not LIBROSA_AVAILABLE:
@@ -335,56 +224,9 @@ def transcribe_file() -> ResponseReturnValue:
             except OSError:
                 pass
 
-        text_result = ""
-
-        if _service.model_type == "vosk":
-            logger.info("Transcribing with Vosk model...")
-
-            audio_int16 = (audio_data * 32768.0).astype(np.int16)
-            audio_bytes = audio_int16.tobytes()
-
-            local_vosk_recognizer = vosk.KaldiRecognizer(_service.model, sample_rate)
-
-            if local_vosk_recognizer.AcceptWaveform(audio_bytes):
-                final_json = local_vosk_recognizer.Result()
-            else:
-                final_json = local_vosk_recognizer.FinalResult()
-
-            result_dict = json.loads(final_json)
-            text_result = result_dict.get("text", "").strip()
-
-            logger.info("Vosk transcription complete")
-
-        elif _service.model_type == "faster-whisper":
-            if not isinstance(_service.model, WhisperModel):
-                return jsonify({"error": "Faster-whisper model not correctly loaded"}), 500
-
-            logger.info("Transcribing with faster-whisper model...")
-
-            if len(audio_data) == 0:
-                text_result = ""
-            else:
-                initial_prompt = _service.get_initial_prompt()
-                segments, info = _service.model.transcribe(
-                    audio_data,
-                    beam_size=5,
-                    language="en",
-                    vad_filter=True,
-                    initial_prompt=initial_prompt,
-                )
-                logger.debug(
-                    f"Detected language '{info.language}' "
-                    f"with probability {info.language_probability:.2f}"
-                )
-                recognized_texts = [segment.text for segment in segments]
-                text_result = "".join(recognized_texts).strip()
-
-            logger.info("Faster-whisper transcription complete")
-
-        else:
-            return jsonify(
-                {"error": f"Unsupported model type configured on server: {_service.model_type}"}
-            ), 500
+        text_result = _service.backend.transcribe(
+            audio_data, initial_prompt=_service.get_initial_prompt()
+        )
 
         logger.info(f"Transcription result: {len(text_result)} characters")
         return jsonify({"text": text_result})
@@ -404,7 +246,7 @@ def transcribe_file() -> ResponseReturnValue:
 
 @app.route("/health", methods=["GET"])
 def health_check() -> ResponseReturnValue:
-    if _service.model:
+    if _service.backend is not None:
         return jsonify(
             {"status": "ok", "model_type": _service.model_type, "message": "Model loaded"}
         ), 200
@@ -465,9 +307,6 @@ def update_dictionary() -> ResponseReturnValue:
 
         _service.dictionary_words = words
         logger.info(f"Dictionary updated with {len(words)} words and saved to {dictionary_path}")
-
-        if _service.model_type == "vosk" and _service.vosk_recognizer:
-            _service.apply_vosk_dictionary(_service.vosk_recognizer)
 
         return jsonify(
             {

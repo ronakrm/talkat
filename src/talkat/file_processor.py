@@ -6,8 +6,9 @@ from pathlib import Path
 
 import httpx
 
+from .clipboard import copy_to_clipboard
 from .logging_config import get_logger
-from .security import safe_subprocess_run, validate_file_path
+from .security import validate_file_path
 
 logger = get_logger(__name__)
 
@@ -207,34 +208,11 @@ def process_audio_file_command(
             # Output to stdout
             print(formatted_output)  # Keep this as print for stdout output
 
-        # Copy to clipboard if requested
         if clipboard:
-            try:
-                import subprocess
-
-                # Try wl-copy first (Wayland)
-                try:
-                    safe_subprocess_run(
-                        ["wl-copy"],
-                        input=transcription.encode("utf-8"),
-                        check=True,
-                        capture_output=True,
-                    )
-                    logger.info("Transcription copied to clipboard")
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    # Fallback to xclip (X11)
-                    try:
-                        safe_subprocess_run(
-                            ["xclip", "-selection", "clipboard"],
-                            input=transcription.encode("utf-8"),
-                            check=True,
-                            capture_output=True,
-                        )
-                        logger.info("Transcription copied to clipboard")
-                    except (subprocess.CalledProcessError, FileNotFoundError):
-                        logger.warning("Could not copy to clipboard (wl-copy or xclip not found)")
-            except Exception as e:
-                logger.warning(f"Could not copy to clipboard: {e}")
+            if copy_to_clipboard(transcription):
+                logger.info("Transcription copied to clipboard")
+            else:
+                logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
 
         # Show summary
         logger.info("\nSummary:")

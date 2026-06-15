@@ -144,10 +144,32 @@ def test_validate_file_path_blocks_path_traversal():
         validate_file_path("../etc/passwd")
 
 
-# NOTE: validate_file_path() calls .resolve() before the .is_symlink() check,
-# which always follows symlinks first — so the symlink-blocking branch is dead
-# code in practice. The right fix is to reorder (check is_symlink first), but
-# that's a behaviour change worth discussing separately; not in scope for §4.
+def test_validate_file_path_blocks_symlinks_by_default(tmp_path):
+    """Symlinks must be rejected by default.
+
+    Regression guard: before the §architecture fix, .resolve() ran before
+    .is_symlink(), so the symlink check was always against the resolved
+    target — never the symlink itself — making the block dead code.
+    """
+    target = tmp_path / "real_file.wav"
+    target.write_text("real content")
+    link = tmp_path / "link.wav"
+    link.symlink_to(target)
+
+    with pytest.raises(SecurityError):
+        validate_file_path(str(link))
+
+
+def test_validate_file_path_allows_symlinks_when_opted_in(tmp_path):
+    """allow_symlinks=True must let symlinks through (resolved to the target)."""
+    target = tmp_path / "real_file.wav"
+    target.write_text("real content")
+    link = tmp_path / "link.wav"
+    link.symlink_to(target)
+
+    resolved = validate_file_path(str(link), allow_symlinks=True)
+    # The result is resolved to the real target, not the symlink.
+    assert resolved == target.resolve()
 
 
 # ---------------------------------------------------------------------------

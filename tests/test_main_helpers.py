@@ -1,14 +1,10 @@
-"""Tests for talkat.main side-effect helpers — copy_to_clipboard, _notify,
-save_transcript, run_calibrate.
+"""Tests for talkat.main side-effect helpers — _notify, save_transcript, run_calibrate.
 
-These are pure-ish wrappers around subprocess calls and disk I/O; we stub the
-subprocess layer with monkeypatch and verify the command dispatch / fallback
-chain / config persistence.
+Tests for the clipboard helper live in test_clipboard.py since that code was
+extracted into its own module.
 """
 
 from __future__ import annotations
-
-import subprocess
 
 import pytest
 
@@ -19,73 +15,6 @@ class _Completed:
     returncode = 0
     stdout = b""
     stderr = b""
-
-
-# ---------------------------------------------------------------------------
-# copy_to_clipboard — wl-copy preferred, xclip fallback, both-missing → False
-# ---------------------------------------------------------------------------
-
-
-def test_copy_to_clipboard_prefers_wl_copy(monkeypatch: pytest.MonkeyPatch):
-    from talkat import main as main_mod
-
-    attempts: list[str] = []
-
-    def fake_run(cmd: list[str], **kwargs: object) -> _Completed:
-        attempts.append(cmd[0])
-        return _Completed()
-
-    monkeypatch.setattr(main_mod, "safe_subprocess_run", fake_run)
-
-    assert main_mod.copy_to_clipboard("hello") is True
-    # wl-copy succeeded, so xclip should never be attempted.
-    assert attempts == ["wl-copy"]
-
-
-def test_copy_to_clipboard_falls_back_to_xclip_when_wl_copy_missing(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from talkat import main as main_mod
-
-    attempts: list[str] = []
-
-    def fake_run(cmd: list[str], **kwargs: object) -> _Completed:
-        attempts.append(cmd[0])
-        if cmd[0] == "wl-copy":
-            raise FileNotFoundError("wl-copy not on PATH")
-        return _Completed()
-
-    monkeypatch.setattr(main_mod, "safe_subprocess_run", fake_run)
-
-    assert main_mod.copy_to_clipboard("hello") is True
-    assert attempts == ["wl-copy", "xclip"]
-
-
-def test_copy_to_clipboard_returns_false_when_neither_tool_available(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from talkat import main as main_mod
-
-    def fake_run(cmd: list[str], **kwargs: object) -> _Completed:
-        raise FileNotFoundError(f"{cmd[0]} not installed")
-
-    monkeypatch.setattr(main_mod, "safe_subprocess_run", fake_run)
-
-    assert main_mod.copy_to_clipboard("hello") is False
-
-
-def test_copy_to_clipboard_returns_false_when_both_tools_error(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """CalledProcessError from each tool must be treated as failure, not raised."""
-    from talkat import main as main_mod
-
-    def fake_run(cmd: list[str], **kwargs: object) -> _Completed:
-        raise subprocess.CalledProcessError(1, cmd)
-
-    monkeypatch.setattr(main_mod, "safe_subprocess_run", fake_run)
-
-    assert main_mod.copy_to_clipboard("hello") is False
 
 
 # ---------------------------------------------------------------------------

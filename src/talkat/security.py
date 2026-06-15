@@ -58,23 +58,24 @@ def validate_file_path(
         SecurityError: If path is unsafe
         FileNotFoundError: If must_exist=True and path doesn't exist
     """
-    # Convert to Path object
-    path_obj = Path(path).expanduser().resolve()
-
-    # Check for path traversal attempts
+    # Reject path-traversal segments before touching the filesystem.
     try:
         if "../" in str(path) or "..\\" in str(path):
             raise SecurityError(f"Path traversal attempt detected: {path}")
     except (OSError, ValueError) as e:
         raise SecurityError(f"Invalid path: {path}") from e
 
-    # Check if path exists when required
+    # Symlink check MUST run before .resolve() — .resolve() follows symlinks,
+    # so any check on the resolved path is always against the resolved target,
+    # not the symlink itself. Check the pre-resolution path first.
+    pre_resolve = Path(path).expanduser()
+    if not allow_symlinks and pre_resolve.is_symlink():
+        raise SecurityError(f"Symbolic links not allowed: {pre_resolve}")
+
+    path_obj = pre_resolve.resolve()
+
     if must_exist and not path_obj.exists():
         raise FileNotFoundError(f"Path does not exist: {path_obj}")
-
-    # Check for symbolic links if not allowed
-    if not allow_symlinks and path_obj.exists() and path_obj.is_symlink():
-        raise SecurityError(f"Symbolic links not allowed: {path_obj}")
 
     # Ensure path is not in sensitive system directories
     sensitive_dirs = ["/etc", "/boot", "/sys", "/proc", "/dev", "/root"]

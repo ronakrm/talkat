@@ -16,16 +16,13 @@ from typing import Any
 
 import httpx
 
+from .clipboard import copy_to_clipboard
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
 from .logging_config import get_logger
 from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager
 from .record import AudioSession, AudioSessionError, calibrate_microphone
-from .security import (
-    safe_subprocess_run,
-    sanitize_text_for_clipboard,
-    sanitize_text_for_typing,
-)
+from .security import safe_subprocess_run, sanitize_text_for_typing
 
 logger = get_logger(__name__)
 
@@ -57,27 +54,6 @@ def save_transcript(text: str, mode: str = "short") -> Path:
         f.write(text + "\n")
 
     return filepath
-
-
-def copy_to_clipboard(text: str) -> bool:
-    """Copy text to clipboard using wl-copy (Wayland) or xclip (X11)."""
-    text = sanitize_text_for_clipboard(text)
-
-    try:
-        safe_subprocess_run(["wl-copy"], input=text.encode("utf-8"), check=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-
-    try:
-        safe_subprocess_run(
-            ["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-
-    return False
 
 
 def _notify(message: str) -> None:

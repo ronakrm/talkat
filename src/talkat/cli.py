@@ -107,6 +107,64 @@ def _overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {k: v for k, v in mapping.items() if v is not None}
 
 
+def _run_model_command(args: argparse.Namespace) -> int:
+    """Dispatch ``talkat model {list,download,use}``.
+
+    Returns an int suitable for ``sys.exit``. Stays out of the main parser
+    body so main() doesn't grow another inline branch.
+    """
+    from .model_manager import (
+        ModelManagerError,
+        download_model,
+        format_size,
+        known_model_names,
+        list_models,
+        use_model,
+    )
+
+    sub = getattr(args, "model_command", None)
+    if sub is None:
+        logger.info("Usage: talkat model {list,download,use} ...")
+        logger.info(f"Known model sizes: {', '.join(known_model_names())}")
+        return 1
+
+    if sub == "list":
+        models = list_models()
+        if not models:
+            logger.info("No faster-whisper models installed yet.")
+            logger.info("Download one with: talkat model download <name>")
+            logger.info(f"Known sizes: {', '.join(known_model_names())}")
+            return 0
+        # Plain print() so users can pipe into wc/grep without log noise.
+        print(f"{'NAME':<24} {'SIZE':>10}  PATH")
+        for m in models:
+            print(f"{m.name:<24} {format_size(m.size_bytes):>10}  {m.path}")
+        return 0
+
+    if sub == "download":
+        try:
+            path = download_model(args.name)
+        except ModelManagerError as e:
+            logger.error(str(e))
+            return 1
+        logger.info(f"Model {args.name!r} ready at {path}")
+        return 0
+
+    if sub == "use":
+        try:
+            config_file, cached = use_model(args.name)
+        except (ValueError, ModelManagerError) as e:
+            logger.error(str(e))
+            return 1
+        logger.info(f"Default model set to {args.name!r} in {config_file}")
+        if cached:
+            logger.info("Restart the model server to pick up the change.")
+        return 0
+
+    logger.error(f"Unknown model subcommand: {sub}")
+    return 1
+
+
 def stop_listen_process(try_only: bool = False) -> int:
     """Stop the running listen process.
 
@@ -285,6 +343,28 @@ def main() -> None:
         help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
     )
 
+    model_parser = subparsers.add_parser(
+        "model",
+        help="Manage faster-whisper models (list, download, use)",
+    )
+    model_sub = model_parser.add_subparsers(dest="model_command", required=False)
+    model_sub.add_parser("list", help="Show installed faster-whisper models + sizes")
+    model_download = model_sub.add_parser(
+        "download",
+        help="Download a faster-whisper model into the local cache",
+    )
+    model_download.add_argument(
+        "name",
+        help="Model name (e.g. 'small.en') or HuggingFace repo id (e.g. 'org/repo')",
+    )
+    model_use = model_sub.add_parser(
+        "use", help="Set the default faster-whisper model in user config"
+    )
+    model_use.add_argument(
+        "name",
+        help="Model name (e.g. 'small.en') or HuggingFace repo id (e.g. 'org/repo')",
+    )
+
     args = parser.parse_args()
 
     # Create user directories on first real invocation (not at import time).
@@ -355,6 +435,8 @@ def main() -> None:
         from .service import uninstall_service
 
         sys.exit(uninstall_service())
+    elif args.command == "model":
+        sys.exit(_run_model_command(args))
     elif args.command == "file":
         sys.exit(
             process_audio_file_command(

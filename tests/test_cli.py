@@ -564,3 +564,122 @@ def test_main_long_dispatches_to_listen_continuous(
     assert captured["background"] is False
     assert captured["clipboard"] is False
     assert captured["overrides"] == {"silence_duration": 5.0}
+
+
+# ---------------------------------------------------------------------------
+# `talkat model` subcommand dispatch (§5c)
+# ---------------------------------------------------------------------------
+
+
+def test_main_model_no_subcommand_prints_help_and_exits_one(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Bare ``talkat model`` should NOT silently succeed — should explain usage."""
+    monkeypatch.setattr(sys, "argv", ["talkat", "model"])
+    rc = _run_main(["talkat", "model"])
+    assert rc == 1
+
+
+def test_main_model_list_invokes_list_models(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path):
+    """``talkat model list`` calls list_models and prints a row per model."""
+    from pathlib import Path
+
+    from talkat import cli as cli_mod
+    from talkat.model_manager import InstalledModel
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_run_model_command",
+        cli_mod._run_model_command,  # use the real one; stub list_models below
+    )
+
+    import talkat.model_manager as mm
+
+    fake_models = [
+        InstalledModel(name="small.en", path=Path("/x/small.en"), size_bytes=500_000_000),
+        InstalledModel(name="tiny.en", path=Path("/x/tiny.en"), size_bytes=75_000_000),
+    ]
+    monkeypatch.setattr(mm, "list_models", lambda config=None: fake_models)
+
+    monkeypatch.setattr(sys, "argv", ["talkat", "model", "list"])
+    rc = _run_main(sys.argv)
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "small.en" in out
+    assert "tiny.en" in out
+    assert "NAME" in out  # header row
+
+
+def test_main_model_list_handles_empty_cache(monkeypatch: pytest.MonkeyPatch, capsys):
+    import talkat.model_manager as mm
+
+    monkeypatch.setattr(mm, "list_models", lambda config=None: [])
+
+    monkeypatch.setattr(sys, "argv", ["talkat", "model", "list"])
+    rc = _run_main(sys.argv)
+    assert rc == 0  # empty is not an error
+    # No table header should appear when there's nothing to list.
+    out = capsys.readouterr().out
+    assert "NAME" not in out
+
+
+def test_main_model_download_invokes_download_model(monkeypatch: pytest.MonkeyPatch):
+    from pathlib import Path
+
+    import talkat.model_manager as mm
+
+    calls: dict[str, str] = {}
+
+    def fake_download(name: str, config: dict | None = None) -> Path:
+        calls["name"] = name
+        return Path("/cache/fake-snapshot")
+
+    monkeypatch.setattr(mm, "download_model", fake_download)
+    monkeypatch.setattr(sys, "argv", ["talkat", "model", "download", "small.en"])
+
+    rc = _run_main(sys.argv)
+    assert rc == 0
+    assert calls["name"] == "small.en"
+
+
+def test_main_model_download_error_exits_one(monkeypatch: pytest.MonkeyPatch):
+    import talkat.model_manager as mm
+
+    def fake_download(name: str, config: dict | None = None):
+        raise mm.ModelManagerError("network down")
+
+    monkeypatch.setattr(mm, "download_model", fake_download)
+    monkeypatch.setattr(sys, "argv", ["talkat", "model", "download", "small.en"])
+    rc = _run_main(sys.argv)
+    assert rc == 1
+
+
+def test_main_model_use_invokes_use_model(monkeypatch: pytest.MonkeyPatch):
+    from pathlib import Path
+
+    import talkat.model_manager as mm
+
+    calls: dict[str, str] = {}
+
+    def fake_use(name: str) -> tuple[Path, bool]:
+        calls["name"] = name
+        return Path("/cfg/config.json"), True
+
+    monkeypatch.setattr(mm, "use_model", fake_use)
+    monkeypatch.setattr(sys, "argv", ["talkat", "model", "use", "tiny.en"])
+    rc = _run_main(sys.argv)
+    assert rc == 0
+    assert calls["name"] == "tiny.en"
+
+
+def test_main_model_use_rejects_unknown(monkeypatch: pytest.MonkeyPatch):
+    import talkat.model_manager as mm
+
+    def fake_use(name: str):
+        raise mm.ModelManagerError(f"Unknown model name: {name!r}")
+
+    monkeypatch.setattr(mm, "use_model", fake_use)
+    monkeypatch.setattr(sys, "argv", ["talkat", "model", "use", "nonsense.zz"])
+    rc = _run_main(sys.argv)
+    assert rc == 1

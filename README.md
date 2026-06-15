@@ -276,6 +276,37 @@ Notes:
 - The CLI flag overrides the config file for a single invocation. Server
   uses its own configured default when the client sends no value.
 
+### Model management
+
+Talkat ships with `model_name: "small.en"` as the default. To switch sizes or
+download additional models, use the `model` subcommand:
+
+```bash
+# List models you've already downloaded
+talkat model list
+
+# Download a new model (faster-whisper resolves the name → HuggingFace repo)
+talkat model download tiny.en
+talkat model download large-v3
+
+# Set the default model for the server to load on next start
+talkat model use medium.en
+systemctl --user restart talkat   # pick up the change
+```
+
+Known faster-whisper sizes: `tiny`, `tiny.en`, `base`, `base.en`, `small`,
+`small.en`, `medium`, `medium.en`, `large-v1`, `large-v2`, `large-v3`, `large`,
+`large-v3-turbo` / `turbo`, plus the `distil-*` variants. The `.en` suffix
+means English-only — smaller and faster but won't transcribe other languages.
+For multilingual dictation pair `talkat model use small` with `language: "auto"`.
+
+For community-quantized or fine-tuned models, pass an explicit HuggingFace repo
+id: `talkat model download mycorp/my-finetuned-whisper`.
+
+Vosk model management isn't covered by this command — Vosk distributes via
+`https://alphacephei.com/vosk/models/` (separate from HuggingFace), so install
+those manually under your `vosk_model_base_dir`.
+
 The model server listens on a unix socket at
 `$XDG_RUNTIME_DIR/talkat/server.sock` (permissions `0600`) — local-only by
 design, no network port to manage. Override with `server_socket` if you

@@ -322,12 +322,14 @@ def test_main_file_dispatches_to_process_audio_file_command(
         output_format: str = "text",
         clipboard: bool = False,
         language: str | None = None,
+        postprocess: str | None = None,
     ) -> int:
         captured["file"] = file_path
         captured["output"] = output_file
         captured["format"] = output_format
         captured["clipboard"] = clipboard
         captured["language"] = language
+        captured["postprocess"] = postprocess
         return 0
 
     monkeypatch.setattr(cli_mod, "process_audio_file_command", fake_handler)
@@ -347,6 +349,7 @@ def test_main_file_dispatches_to_process_audio_file_command(
         "format": "json",
         "clipboard": True,
         "language": None,
+        "postprocess": None,
     }
 
 
@@ -360,11 +363,13 @@ def test_main_batch_dispatches_to_batch_process_files(monkeypatch: pytest.Monkey
         output_dir: str | None = None,
         output_format: str = "text",
         language: str | None = None,
+        postprocess: str | None = None,
     ) -> int:
         captured["files"] = files
         captured["dir"] = output_dir
         captured["format"] = output_format
         captured["language"] = language
+        captured["postprocess"] = postprocess
         return 0
 
     monkeypatch.setattr(cli_mod, "batch_process_files", fake_handler)
@@ -383,6 +388,7 @@ def test_main_batch_dispatches_to_batch_process_files(monkeypatch: pytest.Monkey
     assert captured["dir"] == str(tmp_path)
     assert captured["format"] == "srt"
     assert captured["language"] is None
+    assert captured["postprocess"] is None
 
 
 def test_main_start_long_dispatches_to_start_long_background(
@@ -485,10 +491,13 @@ def test_main_listen_dispatches_to_listen_once_with_overrides(
     captured: dict = {}
 
     def fake_listen_once(
-        output_file: str | None = None, config_overrides: dict | None = None
+        output_file: str | None = None,
+        config_overrides: dict | None = None,
+        postprocess: str | None = None,
     ) -> int:
         captured["output_file"] = output_file
         captured["overrides"] = config_overrides
+        captured["postprocess"] = postprocess
         return 0
 
     monkeypatch.setattr(main_mod, "listen_once", fake_listen_once)
@@ -547,11 +556,13 @@ def test_main_long_dispatches_to_listen_continuous(
         background: bool = False,
         clipboard: bool = True,
         config_overrides: dict | None = None,
+        postprocess: str | None = None,
     ) -> int:
         captured["output_file"] = output_file
         captured["background"] = background
         captured["clipboard"] = clipboard
         captured["overrides"] = config_overrides
+        captured["postprocess"] = postprocess
         return 0
 
     monkeypatch.setattr(main_mod, "listen_continuous", fake_listen_continuous)
@@ -683,3 +694,133 @@ def test_main_model_use_rejects_unknown(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(sys, "argv", ["talkat", "model", "use", "nonsense.zz"])
     rc = _run_main(sys.argv)
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# §5a --postprocess flag parsing (listen / long / file / batch)
+# ---------------------------------------------------------------------------
+
+
+def test_main_listen_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, clean_pid_files):
+    from talkat import main as main_mod
+    from talkat.process_manager import ProcessManager
+
+    captured: dict = {}
+
+    def fake_listen_once(
+        output_file: str | None = None,
+        config_overrides: dict | None = None,
+        postprocess: str | None = None,
+    ) -> int:
+        captured["postprocess"] = postprocess
+        return 0
+
+    monkeypatch.setattr(main_mod, "listen_once", fake_listen_once)
+    monkeypatch.setattr(ProcessManager, "is_running", lambda _self: (False, None))
+    monkeypatch.setattr(ProcessManager, "write_pid", lambda _self, _pid: None)
+    monkeypatch.setattr(sys, "argv", ["talkat", "listen", "--postprocess", "tidy"])
+
+    rc = _run_main(sys.argv)
+    assert rc == 0
+    assert captured["postprocess"] == "tidy"
+
+
+def test_main_long_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, clean_pid_files):
+    from talkat import main as main_mod
+
+    captured: dict = {}
+
+    def fake_listen_continuous(
+        output_file: str | None = None,
+        background: bool = False,
+        clipboard: bool = True,
+        config_overrides: dict | None = None,
+        postprocess: str | None = None,
+    ) -> int:
+        captured["postprocess"] = postprocess
+        return 0
+
+    monkeypatch.setattr(main_mod, "listen_continuous", fake_listen_continuous)
+    monkeypatch.setattr(sys, "argv", ["talkat", "long", "--postprocess", "bullet"])
+
+    rc = _run_main(sys.argv)
+    assert rc == 0
+    assert captured["postprocess"] == "bullet"
+
+
+def test_main_file_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    from talkat import cli as cli_mod
+
+    captured: dict = {}
+
+    def fake_handler(
+        file_path: str,
+        output_file: str | None = None,
+        output_format: str = "text",
+        clipboard: bool = False,
+        language: str | None = None,
+        postprocess: str | None = None,
+    ) -> int:
+        captured["postprocess"] = postprocess
+        return 0
+
+    monkeypatch.setattr(cli_mod, "process_audio_file_command", fake_handler)
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"\x00")
+    monkeypatch.setattr(sys, "argv", ["talkat", "file", str(src), "--postprocess", "code"])
+
+    rc = _run_main(sys.argv)
+    assert rc == 0
+    assert captured["postprocess"] == "code"
+
+
+def test_main_batch_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    from talkat import cli as cli_mod
+
+    captured: dict = {}
+
+    def fake_handler(
+        files: list[str],
+        output_dir: str | None = None,
+        output_format: str = "text",
+        language: str | None = None,
+        postprocess: str | None = None,
+    ) -> int:
+        captured["postprocess"] = postprocess
+        return 0
+
+    monkeypatch.setattr(cli_mod, "batch_process_files", fake_handler)
+    a = tmp_path / "a.wav"
+    a.write_bytes(b"\x00")
+    monkeypatch.setattr(sys, "argv", ["talkat", "batch", str(a), "--postprocess", "email"])
+
+    rc = _run_main(sys.argv)
+    assert rc == 0
+    assert captured["postprocess"] == "email"
+
+
+def test_main_listen_omits_postprocess_when_not_provided(
+    monkeypatch: pytest.MonkeyPatch, clean_pid_files
+):
+    """No --postprocess flag → handler sees postprocess=None."""
+    from talkat import main as main_mod
+    from talkat.process_manager import ProcessManager
+
+    captured: dict = {}
+
+    def fake_listen_once(
+        output_file: str | None = None,
+        config_overrides: dict | None = None,
+        postprocess: str | None = None,
+    ) -> int:
+        captured["postprocess"] = postprocess
+        return 0
+
+    monkeypatch.setattr(main_mod, "listen_once", fake_listen_once)
+    monkeypatch.setattr(ProcessManager, "is_running", lambda _self: (False, None))
+    monkeypatch.setattr(ProcessManager, "write_pid", lambda _self, _pid: None)
+    monkeypatch.setattr(sys, "argv", ["talkat", "listen"])
+
+    rc = _run_main(sys.argv)
+    assert rc == 0
+    assert captured["postprocess"] is None

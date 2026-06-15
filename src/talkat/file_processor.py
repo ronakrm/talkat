@@ -183,6 +183,7 @@ def process_audio_file_command(
     output_format: str = "text",
     clipboard: bool = False,
     language: str | None = None,
+    postprocess: str | None = None,
 ) -> int:
     """
     Process an audio file and output the transcription.
@@ -193,6 +194,8 @@ def process_audio_file_command(
         output_format: Output format (text, json, srt, vtt)
         clipboard: Whether to copy to clipboard
         language: ASR language code; None defers to config default
+        postprocess: Optional AIPP profile name; applies post-transcription,
+            fail-open to the raw transcript.
 
     Returns:
         Exit code (0 for success, 1 for error)
@@ -204,6 +207,11 @@ def process_audio_file_command(
         if not transcription:
             logger.warning("No speech detected in the audio file")
             return 1
+
+        if postprocess:
+            from .postprocess import postprocess_text
+
+            transcription = postprocess_text(transcription, postprocess)
 
         # Format the output
         formatted_output = format_output(transcription, duration, output_format)
@@ -242,6 +250,7 @@ def batch_process_files(
     output_dir: str | None = None,
     output_format: str = "text",
     language: str | None = None,
+    postprocess: str | None = None,
 ) -> int:
     """
     Process multiple audio files in batch.
@@ -251,6 +260,7 @@ def batch_process_files(
         output_dir: Optional output directory
         output_format: Output format for transcriptions
         language: ASR language code; None defers to config default
+        postprocess: Optional AIPP profile name; applied per file.
 
     Returns:
         Exit code (0 for success, 1 for error)
@@ -272,6 +282,11 @@ def batch_process_files(
             transcription, duration = transcribe_audio_file(file_path_str, language=language)
 
             if transcription:
+                if postprocess:
+                    from .postprocess import postprocess_text
+
+                    transcription = postprocess_text(transcription, postprocess)
+
                 formatted_output = format_output(transcription, duration, output_format)
 
                 if output_dir_path:

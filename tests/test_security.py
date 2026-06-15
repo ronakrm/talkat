@@ -459,3 +459,180 @@ def test_safe_subprocess_run_returns_completed_process_verbatim(
 
     result = safe_subprocess_run(["ydotool", "type", "hi"])
     assert result is expected
+
+
+# ---------------------------------------------------------------------------
+# validate_postprocess_profile (§5a)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_profile():
+    return {
+        "base_url": "http://localhost:11434/v1",
+        "model": "llama3.2:3b",
+        "system_prompt": "Tidy this up.",
+    }
+
+
+def test_validate_postprocess_profile_accepts_minimal():
+    from talkat.security import validate_postprocess_profile
+
+    out = validate_postprocess_profile("tidy", _minimal_profile())
+    assert out["base_url"] == "http://localhost:11434/v1"
+
+
+def test_validate_postprocess_profile_accepts_https_and_optional_keys():
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["base_url"] = "https://api.openai.com/v1"
+    p["api_key_env"] = "OPENAI_API_KEY"
+    p["timeout"] = 45.0
+    out = validate_postprocess_profile("openai", p)
+    assert out["api_key_env"] == "OPENAI_API_KEY"
+    assert out["timeout"] == 45.0
+
+
+def test_validate_postprocess_profile_strips_trailing_slash_in_base_url():
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["base_url"] = "http://localhost:11434/v1/"
+    out = validate_postprocess_profile("tidy", p)
+    assert out["base_url"] == "http://localhost:11434/v1"
+
+
+def test_validate_postprocess_profile_rejects_non_dict():
+    from talkat.security import validate_postprocess_profile
+
+    with pytest.raises(ValueError, match="must be an object"):
+        validate_postprocess_profile("tidy", "not a dict")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("missing", ["base_url", "model", "system_prompt"])
+def test_validate_postprocess_profile_rejects_missing_required(missing: str):
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    del p[missing]
+    with pytest.raises(ValueError, match=f"missing required key {missing!r}"):
+        validate_postprocess_profile("tidy", p)
+
+
+@pytest.mark.parametrize("empty_field", ["base_url", "model", "system_prompt"])
+def test_validate_postprocess_profile_rejects_empty_required(empty_field: str):
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p[empty_field] = ""
+    with pytest.raises(ValueError, match="non-empty string"):
+        validate_postprocess_profile("tidy", p)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "ftp://example.com",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "localhost:11434/v1",  # missing scheme
+        "/relative/path",
+    ],
+)
+def test_validate_postprocess_profile_rejects_non_http_scheme(bad_url: str):
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["base_url"] = bad_url
+    with pytest.raises(ValueError, match="http:// or https://"):
+        validate_postprocess_profile("tidy", p)
+
+
+def test_validate_postprocess_profile_rejects_oversize_model():
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["model"] = "x" * 300
+    with pytest.raises(ValueError, match="model too long"):
+        validate_postprocess_profile("tidy", p)
+
+
+def test_validate_postprocess_profile_rejects_unknown_keys():
+    """Typos like 'system_promt' should fail loudly, not silently no-op."""
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["system_promt"] = "x"  # intentional typo
+    with pytest.raises(ValueError, match="unknown keys"):
+        validate_postprocess_profile("tidy", p)
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    ["1OPENAI", "OPENAI-KEY", "with space", "x;y", ""],
+)
+def test_validate_postprocess_profile_rejects_invalid_env_name(bad_env: str):
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["api_key_env"] = bad_env
+    with pytest.raises(ValueError):
+        validate_postprocess_profile("tidy", p)
+
+
+def test_validate_postprocess_profile_api_key_env_can_be_null():
+    """Explicit null is the same as the key being absent."""
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["api_key_env"] = None
+    out = validate_postprocess_profile("tidy", p)
+    assert out["api_key_env"] is None
+
+
+@pytest.mark.parametrize("bad_timeout", [-1, 0, 601, "30", True])
+def test_validate_postprocess_profile_rejects_bad_timeout(bad_timeout: object):
+    from talkat.security import validate_postprocess_profile
+
+    p = _minimal_profile()
+    p["timeout"] = bad_timeout
+    with pytest.raises(ValueError):
+        validate_postprocess_profile("tidy", p)
+
+
+# Integration with validate_json_config
+
+
+def test_validate_json_config_validates_postprocess_profiles_dict():
+    from talkat.security import validate_json_config
+
+    out = validate_json_config(
+        {
+            "postprocess_profiles": {
+                "tidy": _minimal_profile(),
+            }
+        }
+    )
+    assert "tidy" in out["postprocess_profiles"]
+
+
+def test_validate_json_config_rejects_non_dict_profiles_field():
+    from talkat.security import validate_json_config
+
+    with pytest.raises(ValueError, match="must be an object"):
+        validate_json_config({"postprocess_profiles": ["not", "a", "dict"]})
+
+
+def test_validate_json_config_rejects_profile_with_bad_url():
+    from talkat.security import validate_json_config
+
+    p = _minimal_profile()
+    p["base_url"] = "ftp://nope"
+    with pytest.raises(ValueError):
+        validate_json_config({"postprocess_profiles": {"bad": p}})
+
+
+def test_code_defaults_includes_empty_postprocess_profiles():
+    from talkat.config import CODE_DEFAULTS
+
+    assert CODE_DEFAULTS["postprocess_profiles"] == {}

@@ -192,3 +192,93 @@ def test_batch_process_files_chooses_extension_by_format(
         rc = batch_process_files([str(src)], output_dir=str(outdir), output_format=fmt)
         assert rc == 0
         assert (outdir / f"f{ext}").exists()
+
+
+# ---------------------------------------------------------------------------
+# §5a postprocess wiring — file + batch
+# ---------------------------------------------------------------------------
+
+
+def test_process_audio_file_command_applies_postprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When --postprocess is set, the output file holds the AIPP result."""
+    from talkat import file_processor as fp
+
+    monkeypatch.setattr(fp, "transcribe_audio_file", lambda *_a, **_k: ("raw text", 1.0))
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_postprocess(text: str, profile_name: str, **_kw) -> str:
+        calls.append((text, profile_name))
+        return "POLISHED"
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", fake_postprocess)
+
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"\x00")
+    dst = tmp_path / "out.txt"
+
+    rc = process_audio_file_command(
+        str(src), output_file=str(dst), output_format="text", postprocess="tidy"
+    )
+    assert rc == 0
+    assert dst.read_text() == "POLISHED"
+    assert calls == [("raw text", "tidy")]
+
+
+def test_process_audio_file_command_skips_postprocess_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from talkat import file_processor as fp
+
+    monkeypatch.setattr(fp, "transcribe_audio_file", lambda *_a, **_k: ("raw", 1.0))
+
+    called: list[bool] = []
+
+    def boom(*_a, **_kw) -> str:
+        called.append(True)
+        return ""
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", boom)
+
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"\x00")
+    dst = tmp_path / "out.txt"
+    rc = process_audio_file_command(str(src), output_file=str(dst), output_format="text")
+    assert rc == 0
+    assert dst.read_text() == "raw"
+    assert called == []
+
+
+def test_batch_process_files_applies_postprocess_per_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AIPP runs per file in batch (matches the file command's per-file shape)."""
+    from talkat import file_processor as fp
+
+    monkeypatch.setattr(
+        fp, "transcribe_audio_file", lambda path, *_a, **_k: (f"raw:{Path(path).stem}", 1.0)
+    )
+
+    calls: list[str] = []
+
+    def fake_postprocess(text: str, profile_name: str, **_kw) -> str:
+        calls.append(text)
+        return text.upper()
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", fake_postprocess)
+
+    a = tmp_path / "a.wav"
+    b = tmp_path / "b.wav"
+    for f in (a, b):
+        f.write_bytes(b"\x00")
+    outdir = tmp_path / "out"
+
+    rc = batch_process_files(
+        [str(a), str(b)], output_dir=str(outdir), output_format="text", postprocess="tidy"
+    )
+    assert rc == 0
+    assert calls == ["raw:a", "raw:b"]
+    assert (outdir / "a.txt").read_text() == "RAW:A"
+    assert (outdir / "b.txt").read_text() == "RAW:B"

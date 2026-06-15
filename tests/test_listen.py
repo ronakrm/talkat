@@ -210,3 +210,100 @@ def test_listen_once_sanitizes_text_before_typing(clean_pid_files, listen_env):
     # "hi" and "there" should still be present.
     assert "hi" in typed_arg
     assert "there" in typed_arg
+
+
+# ---------------------------------------------------------------------------
+# §5a postprocess wiring — listen_once with --postprocess
+# ---------------------------------------------------------------------------
+
+
+def test_listen_once_postprocess_typed_text_is_the_processed_output(
+    clean_pid_files, listen_env, monkeypatch: pytest.MonkeyPatch
+):
+    """`--postprocess tidy` must type the LLM output, not the raw transcript."""
+    from talkat.main import listen_once
+
+    _install_stub_transcriber(listen_env["main_mod"], text="hello world")
+
+    captured: list[tuple[str, str]] = []
+
+    def fake_postprocess(text: str, profile_name: str, *, config: dict | None = None) -> str:
+        captured.append((text, profile_name))
+        return "Hello, world."
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", fake_postprocess)
+
+    rc = listen_once(postprocess="tidy")
+
+    assert rc == 0
+    assert captured == [("hello world", "tidy")]
+    ydotool_calls = [c for c in listen_env["subprocess_calls"] if c and c[0] == "ydotool"]
+    assert len(ydotool_calls) == 1
+    assert ydotool_calls[0][3] == "Hello, world."
+
+
+def test_listen_once_postprocess_failopen_still_types_raw(
+    clean_pid_files, listen_env, monkeypatch: pytest.MonkeyPatch
+):
+    """When AIPP returns the raw text (its fail-open contract), ydotool still fires.
+
+    We don't exercise the failure path here — we just confirm that returning
+    the input verbatim from postprocess_text yields the same ydotool call as
+    not using --postprocess at all.
+    """
+    from talkat.main import listen_once
+
+    _install_stub_transcriber(listen_env["main_mod"], text="raw text")
+
+    monkeypatch.setattr(
+        "talkat.postprocess.postprocess_text",
+        lambda text, _name, **_kw: text,  # fail-open shape
+    )
+
+    rc = listen_once(postprocess="broken")
+    assert rc == 0
+    ydotool_calls = [c for c in listen_env["subprocess_calls"] if c and c[0] == "ydotool"]
+    assert len(ydotool_calls) == 1
+    assert ydotool_calls[0][3] == "raw text"
+
+
+def test_listen_once_no_postprocess_arg_skips_aipp(
+    clean_pid_files, listen_env, monkeypatch: pytest.MonkeyPatch
+):
+    """When --postprocess isn't passed, postprocess_text must not be called."""
+    from talkat.main import listen_once
+
+    _install_stub_transcriber(listen_env["main_mod"], text="hi")
+
+    called: list[bool] = []
+
+    def boom(*_a, **_kw) -> str:
+        called.append(True)
+        return ""
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", boom)
+
+    rc = listen_once()
+    assert rc == 0
+    assert called == [], "postprocess_text must not be invoked without --postprocess"
+
+
+def test_listen_once_postprocess_skipped_on_empty_transcription(
+    clean_pid_files, listen_env, monkeypatch: pytest.MonkeyPatch
+):
+    """No speech → no AIPP call (we already short-circuit on empty)."""
+    from talkat.main import listen_once
+
+    _install_stub_transcriber(listen_env["main_mod"], text="")
+
+    called: list[bool] = []
+
+    def fake(*_a, **_kw) -> str:
+        called.append(True)
+        return ""
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", fake)
+
+    rc = listen_once(postprocess="tidy")
+    assert rc == 0
+    assert called == [], "AIPP must not run on empty transcription"

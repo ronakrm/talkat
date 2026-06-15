@@ -400,6 +400,132 @@ def test_max_session_duration_break_stops_the_loop(
     ], "queued event must remain un-consumed when max-session break fires"
 
 
+# ---------------------------------------------------------------------------
+# §5a postprocess — end-of-session AIPP for listen_continuous
+# ---------------------------------------------------------------------------
+
+
+def test_long_mode_postprocess_runs_once_on_full_transcript(
+    clean_pid_files, patched_long_mode, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """AIPP must run exactly once at session end with the concatenated transcript.
+
+    Per-utterance AIPP would lose cross-utterance context and multiply LLM
+    cost N times — see listen_continuous docstring. This test pins the
+    "once at the end on the full text" semantics.
+    """
+    from talkat import main as main_mod
+    from talkat.main import listen_continuous
+
+    def factory(config: dict) -> FakeTranscriber:
+        fake = FakeTranscriber(config)
+        fake.events = ["hello", "this is talkat", "goodbye"]
+        patched_long_mode["fake"] = fake
+        return fake
+
+    main_mod.TranscriptionClient = factory  # type: ignore[attr-defined]
+
+    aipp_calls: list[tuple[str, str]] = []
+
+    def fake_postprocess(text: str, profile_name: str, *, config: dict | None = None) -> str:
+        aipp_calls.append((text, profile_name))
+        return "POLISHED: " + text.strip()
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", fake_postprocess)
+
+    output = tmp_path / "transcript.txt"
+    rc = listen_continuous(
+        output_file=str(output),
+        background=False,
+        clipboard=False,
+        postprocess="tidy",
+    )
+
+    assert rc == 0
+    assert len(aipp_calls) == 1, "AIPP should run exactly once for the whole session"
+    text, profile = aipp_calls[0]
+    assert profile == "tidy"
+    assert "hello" in text and "this is talkat" in text and "goodbye" in text
+
+    # Side-by-side .processed.txt should hold the AIPP output; raw transcript
+    # remains as the source of truth.
+    processed = output.with_suffix(".processed.txt")
+    assert processed.exists(), "expected .processed.txt next to the raw transcript"
+    assert processed.read_text(encoding="utf-8").startswith("POLISHED: ")
+    assert "hello" in output.read_text(encoding="utf-8"), "raw transcript must remain intact"
+
+
+def test_long_mode_postprocess_not_invoked_when_arg_omitted(
+    clean_pid_files, patched_long_mode, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from talkat import main as main_mod
+    from talkat.main import listen_continuous
+
+    def factory(config: dict) -> FakeTranscriber:
+        fake = FakeTranscriber(config)
+        fake.events = ["hello"]
+        patched_long_mode["fake"] = fake
+        return fake
+
+    main_mod.TranscriptionClient = factory  # type: ignore[attr-defined]
+
+    called: list[bool] = []
+
+    def boom(*_a, **_kw) -> str:
+        called.append(True)
+        return ""
+
+    monkeypatch.setattr("talkat.postprocess.postprocess_text", boom)
+
+    output = tmp_path / "transcript.txt"
+    listen_continuous(output_file=str(output), background=False, clipboard=False)
+    assert called == []
+
+
+def test_long_mode_postprocess_failopen_keeps_raw_clipboard(
+    clean_pid_files, patched_long_mode, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """When AIPP returns the input unchanged, no .processed.txt is written.
+
+    The side-by-side file only exists when AIPP actually changed the text.
+    This avoids polluting the transcripts dir with no-op duplicates and
+    makes the file's presence a signal that AIPP ran successfully.
+    """
+    from talkat import main as main_mod
+    from talkat.main import listen_continuous
+
+    def factory(config: dict) -> FakeTranscriber:
+        fake = FakeTranscriber(config)
+        fake.events = ["hello world"]
+        patched_long_mode["fake"] = fake
+        return fake
+
+    main_mod.TranscriptionClient = factory  # type: ignore[attr-defined]
+
+    # fail-open shape: returns input unchanged
+    monkeypatch.setattr(
+        "talkat.postprocess.postprocess_text",
+        lambda text, _name, **_kw: text,
+    )
+
+    clipboard_calls: list[str] = []
+    monkeypatch.setattr(main_mod, "copy_to_clipboard", lambda t: clipboard_calls.append(t) or True)
+
+    output = tmp_path / "transcript.txt"
+    rc = listen_continuous(
+        output_file=str(output),
+        background=False,
+        clipboard=True,
+        postprocess="tidy",
+    )
+
+    assert rc == 0
+    processed = output.with_suffix(".processed.txt")
+    assert not processed.exists(), "no .processed.txt expected when AIPP was a no-op"
+    assert clipboard_calls, "clipboard should still be fed the raw transcript"
+    assert "hello world" in clipboard_calls[0]
+
+
 def test_silence_timeout_break_stops_the_loop(
     clean_pid_files, patched_long_mode, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

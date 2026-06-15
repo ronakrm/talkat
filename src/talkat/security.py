@@ -137,6 +137,82 @@ def validate_language(language: str) -> str:
     return language
 
 
+def validate_postprocess_profile(name: str, profile: object) -> dict[str, Any]:
+    """Validate one AIPP profile.
+
+    Required keys (all strings):
+        - ``base_url`` — http:// or https:// origin of an OpenAI-compatible
+          server. Path part is normalized to end without a trailing slash so
+          ``/chat/completions`` can be appended cleanly.
+        - ``model`` — model identifier passed verbatim in the request body.
+        - ``system_prompt`` — system message text. We don't bound length here
+          (users may want fairly long prompts); the OpenAI-compat endpoint
+          will reject anything beyond the model's context.
+
+    Optional keys:
+        - ``api_key_env`` — name of an environment variable holding the
+          bearer token. Profiles never store the token itself — we want the
+          config file safe to share. Must look like a UNIX env var.
+        - ``timeout`` — float seconds, 0 < t ≤ 600. Defaults to 30 when
+          omitted.
+
+    Returns the (possibly normalized) profile dict.
+    """
+    if not isinstance(profile, dict):
+        raise ValueError(f"postprocess profile {name!r} must be an object")
+
+    required = ("base_url", "model", "system_prompt")
+    for key in required:
+        if key not in profile:
+            raise ValueError(f"postprocess profile {name!r} missing required key {key!r}")
+        if not isinstance(profile[key], str) or not profile[key]:
+            raise ValueError(f"postprocess profile {name!r} {key!r} must be a non-empty string")
+
+    base_url = profile["base_url"]
+    if not base_url.startswith(("http://", "https://")):
+        raise ValueError(
+            f"postprocess profile {name!r} base_url must start with http:// or https://; "
+            f"got {base_url!r}"
+        )
+    # Normalize: drop trailing slash so we can append "/chat/completions" cleanly.
+    profile["base_url"] = base_url.rstrip("/")
+
+    if len(profile["model"]) > 256:
+        raise ValueError(f"postprocess profile {name!r} model too long: {len(profile['model'])}")
+
+    allowed_keys = set(required) | {"api_key_env", "timeout"}
+    unknown = set(profile) - allowed_keys
+    if unknown:
+        raise ValueError(
+            f"postprocess profile {name!r} has unknown keys: {sorted(unknown)}. "
+            f"Allowed: {sorted(allowed_keys)}"
+        )
+
+    if "api_key_env" in profile and profile["api_key_env"] is not None:
+        env_name = profile["api_key_env"]
+        if not isinstance(env_name, str):
+            raise ValueError(
+                f"postprocess profile {name!r} api_key_env must be a string, "
+                f"got {type(env_name).__name__}"
+            )
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", env_name):
+            raise ValueError(
+                f"postprocess profile {name!r} api_key_env {env_name!r} is not a valid "
+                "environment variable name"
+            )
+
+    if "timeout" in profile:
+        t = profile["timeout"]
+        if isinstance(t, bool) or not isinstance(t, int | float):
+            raise ValueError(
+                f"postprocess profile {name!r} timeout must be a number, got {type(t).__name__}"
+            )
+        if not 0 < float(t) <= 600:
+            raise ValueError(f"postprocess profile {name!r} timeout must be 0 < t ≤ 600, got {t}")
+
+    return profile
+
+
 def validate_command(command: list[str]) -> list[str]:
     """
     Validate a command for subprocess execution.
@@ -351,6 +427,21 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
 
     if "language" in config:
         config["language"] = validate_language(config["language"])
+
+    if "postprocess_profiles" in config:
+        profiles = config["postprocess_profiles"]
+        if not isinstance(profiles, dict):
+            raise ValueError(
+                f"postprocess_profiles must be an object, got {type(profiles).__name__}"
+            )
+        validated_profiles: dict[str, Any] = {}
+        for profile_name, profile in profiles.items():
+            if not isinstance(profile_name, str) or not profile_name:
+                raise ValueError(
+                    f"postprocess profile name must be a non-empty string: {profile_name!r}"
+                )
+            validated_profiles[profile_name] = validate_postprocess_profile(profile_name, profile)
+        config["postprocess_profiles"] = validated_profiles
 
     # Bounded free-form strings — guard against accidental DoS via huge values.
     string_max_len: dict[str, int] = {}

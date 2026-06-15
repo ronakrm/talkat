@@ -312,6 +312,58 @@ The model server listens on a unix socket at
 design, no network port to manage. Override with `server_socket` if you
 need to.
 
+### AI post-processing (AIPP)
+
+Pipe transcripts through a local or hosted LLM before they hit the keyboard.
+Useful for cleaning up grammar, formatting as bullet lists, rewriting as code,
+etc. Disabled by default; opt in per invocation with `--postprocess <name>`.
+
+Profiles live under `postprocess_profiles` in `~/.config/talkat/config.json`.
+Talkat speaks the OpenAI-compatible `/v1/chat/completions` shape, which
+transparently covers Ollama, llama.cpp server, LM Studio, vLLM, OpenRouter,
+and OpenAI itself.
+
+```json
+{
+    "postprocess_profiles": {
+        "tidy": {
+            "base_url": "http://localhost:11434/v1",
+            "model": "llama3.2:3b",
+            "system_prompt": "Clean up grammar and punctuation. Keep the meaning identical. Return only the cleaned text.",
+            "timeout": 30
+        },
+        "openai-clean": {
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "system_prompt": "Format the input as professional prose. Return only the rewritten text.",
+            "api_key_env": "OPENAI_API_KEY"
+        }
+    }
+}
+```
+
+Then:
+```bash
+talkat listen --postprocess tidy
+talkat long --postprocess tidy        # applied once to the full session at end
+talkat file recording.wav --postprocess tidy
+talkat batch *.wav -o out/ --postprocess tidy
+```
+
+**Security note**: API keys are referenced by environment variable name
+(`api_key_env`), never stored in the config file directly. The config file is
+therefore safe to commit / share.
+
+**Fail-open**: if the LLM is unreachable, returns an error, or takes too long,
+talkat logs the failure, fires a notification, and types the **raw** transcript.
+AIPP cannot lose your dictation.
+
+For `long` mode, AIPP runs **once at session end** on the concatenated
+transcript (preserves cross-utterance context, single LLM call). The
+processed result is written alongside the raw transcript as
+`<timestamp>_long.processed.txt` and copied to the clipboard. The raw file
+is kept as the source of truth.
+
 ### Transcript Features
 - All transcripts (both short and long mode) are saved to `~/.local/share/talkat/transcripts/`
 - Short mode: saves as `YYYYMMDD_HHMMSS_short.txt`

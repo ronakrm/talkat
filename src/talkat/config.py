@@ -65,6 +65,11 @@ CODE_DEFAULTS: dict[str, Any] = {
     "transcript_dir": str(TRANSCRIPT_DIR),
     # Dictionary Configuration
     "dictionary_file": str(DICTIONARY_FILE),
+    # AI Post-Processing (AIPP) — opt-in, off by default.
+    # Map of profile-name → {base_url, model, system_prompt, api_key_env?, timeout?}.
+    # Activated per-invocation with `--postprocess <name>`; see security.py
+    # ``validate_postprocess_profile`` for the full schema.
+    "postprocess_profiles": {},
 }
 
 

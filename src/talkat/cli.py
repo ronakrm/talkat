@@ -235,6 +235,13 @@ def main() -> None:
         metavar="CODE",
         help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
     )
+    listen_parser.add_argument(
+        "--postprocess",
+        type=str,
+        metavar="PROFILE",
+        help="Pipe the transcript through the named AIPP profile from config "
+        "(see 'postprocess_profiles'). Falls back to raw transcript on any error.",
+    )
 
     long_parser = subparsers.add_parser(
         "long", help="Start long dictation mode (continuous recording)"
@@ -269,6 +276,13 @@ def main() -> None:
         type=str,
         metavar="CODE",
         help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
+    )
+    long_parser.add_argument(
+        "--postprocess",
+        type=str,
+        metavar="PROFILE",
+        help="Apply the named AIPP profile to the full transcript at session end. "
+        "Writes a side-by-side '.processed.txt' and clipboards the processed result.",
     )
 
     start_long_parser = subparsers.add_parser(
@@ -325,6 +339,12 @@ def main() -> None:
         metavar="CODE",
         help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
     )
+    file_parser.add_argument(
+        "--postprocess",
+        type=str,
+        metavar="PROFILE",
+        help="Pipe the transcription through the named AIPP profile before output.",
+    )
 
     batch_parser = subparsers.add_parser("batch", help="Process multiple audio files")
     batch_parser.add_argument("files", nargs="+", help="Audio files to process")
@@ -341,6 +361,12 @@ def main() -> None:
         type=str,
         metavar="CODE",
         help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
+    )
+    batch_parser.add_argument(
+        "--postprocess",
+        type=str,
+        metavar="PROFILE",
+        help="Pipe each file's transcription through the named AIPP profile before output.",
     )
 
     model_parser = subparsers.add_parser(
@@ -397,6 +423,7 @@ def main() -> None:
             listen_once(
                 output_file=args.output,
                 config_overrides=_overrides_from_args(args),
+                postprocess=args.postprocess,
             )
         )
     elif args.command == "long":
@@ -411,6 +438,7 @@ def main() -> None:
                 background=args.background,
                 clipboard=clipboard_enabled,
                 config_overrides=_overrides_from_args(args),
+                postprocess=args.postprocess,
             )
         )
     elif args.command == "start-long":
@@ -445,6 +473,7 @@ def main() -> None:
                 args.format,
                 args.clipboard,
                 language=args.language,
+                postprocess=args.postprocess,
             )
         )
     elif args.command == "batch":
@@ -454,6 +483,7 @@ def main() -> None:
                 args.output_dir,
                 args.format,
                 language=args.language,
+                postprocess=args.postprocess,
             )
         )
     else:

@@ -204,12 +204,18 @@ def run_calibrate() -> int:
 def listen_once(
     output_file: str | None = None,
     config_overrides: dict[str, Any] | None = None,
+    postprocess: str | None = None,
 ) -> int:
     """Record one utterance and either type it (default) or save it to a file.
 
     The caller (cli.py) is responsible for acquiring the listen process lock,
     deciding to start vs. stop, and writing this process's PID into the PID
     file under that lock. We only clean up on exit.
+
+    When ``postprocess`` is set, the transcript is piped through the named
+    AIPP profile before output. AIPP is fail-open — a misconfigured profile
+    or unreachable LLM falls back to typing the raw transcript with a
+    notification, so the dictation is never lost.
     """
     config = load_app_config()
     if config_overrides:
@@ -263,6 +269,13 @@ def listen_once(
         transcript_path = save_transcript(text, mode="short")
         logger.info(f"Transcript saved to: {transcript_path}")
 
+    if postprocess:
+        from .postprocess import postprocess_text
+
+        text = postprocess_text(text, postprocess, config=config)
+        # postprocess_text fails open — text is the AIPP output on success,
+        # the original transcript on failure. Either way it's typable.
+
     if output_file:
         output_path = Path(output_file).expanduser()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -295,8 +308,17 @@ def listen_continuous(
     background: bool = False,
     clipboard: bool = True,
     config_overrides: dict[str, Any] | None = None,
+    postprocess: str | None = None,
 ) -> int:
-    """Run continuous dictation: loop transcribing utterances until interrupted."""
+    """Run continuous dictation: loop transcribing utterances until interrupted.
+
+    When ``postprocess`` is set, the AIPP profile is applied **once at end of
+    session** to the concatenated transcript (not per utterance). This is
+    deliberate — running an LLM on each utterance loses cross-utterance
+    context and multiplies cost N times. The processed result is written
+    alongside the raw transcript as ``<name>.processed.txt`` and copied to
+    the clipboard. The raw transcript file is kept as the source of truth.
+    """
     config = load_app_config()
     if config_overrides:
         config.update(config_overrides)
@@ -432,7 +454,25 @@ def listen_continuous(
 
         if full_text:
             word_count = len(full_text.split()) or session_word_count
-            clipboard_ok = clipboard and copy_to_clipboard(full_text)
+
+            # End-of-session AIPP (if requested). Single LLM call on the full
+            # transcript so the model sees the whole context. Side-by-side
+            # .processed.txt keeps the raw file intact as source of truth.
+            clipboard_text = full_text
+            if postprocess:
+                from .postprocess import postprocess_text
+
+                processed = postprocess_text(full_text, postprocess, config=config)
+                if processed and processed != full_text:
+                    processed_path = transcript_path.with_suffix(".processed.txt")
+                    try:
+                        processed_path.write_text(processed, encoding="utf-8")
+                        logger.info(f"Post-processed transcript saved to: {processed_path}")
+                        clipboard_text = processed
+                    except OSError as e:
+                        logger.error(f"Could not write processed transcript: {e}")
+
+            clipboard_ok = clipboard and copy_to_clipboard(clipboard_text)
             if clipboard and not clipboard_ok:
                 logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
             logger.info(f"Full transcript saved to: {transcript_path}")

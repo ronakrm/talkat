@@ -9,11 +9,11 @@ A voice command system with local model server for privacy and offline use. Talk
 
 ## Status
 
-Pre-1.0 but actively used. CI runs tests + lint + type-check on every push, the
-codebase is mypy-strict, and the runtime surface is covered by ~370 automated
-tests. Config / CLI / on-disk layout are still subject to change before `v1.0.0`
-tags. Issues and PRs welcome — see [the v1.0.0 plan](docs/v1.0.0-plan.md) for
-what's tracked.
+Stable as of `v1.0.0`. The CLI, on-disk layout, and wire protocol are
+considered stable surface; breaking changes go through a deprecation cycle.
+CI runs tests + lint + type-check on every push, the codebase is mypy-strict,
+and the runtime surface is covered by ~370 automated tests. Issues and PRs
+welcome — see [CHANGELOG.md](CHANGELOG.md) for what's in each release.
 
 ## System Requirements
 

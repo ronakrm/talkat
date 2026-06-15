@@ -10,7 +10,7 @@ from .paths import (
     SOCKET_FILE,
     TRANSCRIPT_DIR,
     VOSK_CACHE_DIR,
-    get_config_file,
+    get_config_files,
 )
 
 logger = get_logger(__name__)
@@ -74,26 +74,37 @@ CODE_DEFAULTS: dict[str, Any] = {
 
 
 def load_app_config() -> dict[str, Any]:
-    """Loads the application configuration from a JSON file.
-    Merges with code defaults, file values taking precedence.
+    """Load the effective configuration by merging all available layers.
+
+    Layers, lowest to highest precedence:
+        1. ``CODE_DEFAULTS`` (built into the package)
+        2. ``/etc/talkat/config.json`` (system, optional — set by packagers)
+        3. ``~/.config/talkat/config.json`` (per-user, optional)
+
+    Each layer partially overrides the previous, so a user can override
+    one key without restating the rest. A malformed layer logs an error
+    and is skipped — the remaining layers still apply.
+
+    CLI-level overrides (``--max-recording`` etc.) are merged on top of
+    the result by callers in ``cli.py``; they do not live here.
     """
     from .security import validate_json_config
 
     config = CODE_DEFAULTS.copy()
-    config_file = get_config_file()
+    layers = get_config_files()
+    if not layers:
+        logger.debug("No config files found. Using code defaults.")
+        return config
 
-    if config_file.exists():
-        logger.debug(f"Loading config from {config_file}...")
+    for path in layers:
+        logger.debug(f"Loading config from {path}...")
         try:
-            with open(config_file) as f:
-                file_config = json.load(f)
-            # Validate the loaded config
-            file_config = validate_json_config(file_config)
-            config.update(file_config)
-        except (json.JSONDecodeError, ValueError, TypeError) as e:
-            logger.error(f"Error loading config from {config_file}: {e}. Using defaults.")
-    else:
-        logger.debug(f"No config file found at {config_file}. Using defaults.")
+            with open(path) as f:
+                layer = json.load(f)
+            layer = validate_json_config(layer)
+            config.update(layer)
+        except (json.JSONDecodeError, ValueError, TypeError, OSError) as e:
+            logger.error(f"Error loading config from {path}: {e}. Skipping this layer.")
     return config
 
 

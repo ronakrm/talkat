@@ -20,16 +20,22 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Sound/Audio :: Speech"
 ]
+# Upper bounds: next major for stable (1.x+) packages, next minor for 0.x
+# packages where minor bumps are allowed to break API. Lockfile is the
+# source of truth for reproducible installs; these caps prevent a fresh
+# `uv sync` (or downstream pip install without --frozen) from silently
+# adopting a breaking major release.
 dependencies = [
-    "faster-whisper>=1.1.1",
-    "numpy>=1.24.0",
-    "pyaudio>=0.2.14",
-    "vosk>=0.3.45",
-    "flask>=2.0",
-    "waitress>=2.1",
-    "httpx>=0.25",
-    "librosa>=0.10.1",
-    "soundfile>=0.12.1"
+    "faster-whisper>=1.1.1,<2",
+    "huggingface-hub>=0.30,<1",  # used directly by model_manager (also a faster-whisper transitive dep)
+    "numpy>=1.24.0,<3",
+    "pyaudio>=0.2.14,<0.3",
+    "vosk>=0.3.45,<0.4",
+    "flask>=2.0,<4",
+    "waitress>=2.1,<4",
+    "httpx>=0.25,<1",
+    "librosa>=0.10.1,<0.13",
+    "soundfile>=0.12.1,<0.14",
 ]
 
 [project.urls]
@@ -133,10 +139,11 @@ filterwarnings = [
 
 # Coverage configuration — opt-in via `pytest --cov=talkat` (CI already does this).
 # We omit entry points and modules that need a real model/audio device to exercise.
+# model_server.py is covered indirectly via tests/test_integration_model_server.py,
+# which drives the real Flask routes through waitress + UDS with a FakeBackend.
 [tool.coverage.run]
 source = ["src/talkat"]
 omit = [
-    "src/talkat/model_server.py", # needs real ASR model; flask-test-client coverage is a follow-up
     "src/talkat/logging_config.py",
     "src/talkat/devices.py",      # touches real PortAudio device enumeration
 ]

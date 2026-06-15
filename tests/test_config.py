@@ -1,6 +1,9 @@
 """Tests for talkat.config — load/save round-trip and error handling."""
 
 import json
+from pathlib import Path
+
+import pytest
 
 from talkat.config import CODE_DEFAULTS, load_app_config, save_app_config
 
@@ -57,3 +60,88 @@ def test_load_returns_defaults_on_invalid_value(clean_config_file):
 
     # Invalid file was rejected; defaults are used.
     assert cfg["http_timeout"] == CODE_DEFAULTS["http_timeout"]
+
+
+# ---------------------------------------------------------------------------
+# Layered config merge: CODE_DEFAULTS → /etc → ~/.config
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def system_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect SYSTEM_CONFIG_FILE into a tmp_path for the test.
+
+    The real path is /etc/talkat/config.json which we can't write to in
+    tests. Patching the module-level constant lets get_config_files()
+    pick up our fake without changing its semantics.
+    """
+    fake = tmp_path / "etc" / "talkat" / "config.json"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("talkat.paths.SYSTEM_CONFIG_FILE", fake)
+    return fake
+
+
+def test_system_config_applied_when_user_missing(clean_config_file, system_config_path: Path):
+    """With /etc config present and no user config, the system values win over defaults."""
+    assert not clean_config_file.exists()
+    system_config_path.write_text(json.dumps({"http_timeout": 42, "silence_duration": 1.5}))
+
+    cfg = load_app_config()
+
+    assert cfg["http_timeout"] == 42
+    assert cfg["silence_duration"] == 1.5
+    # Keys not in /etc still fall back to CODE_DEFAULTS.
+    assert cfg["model_type"] == CODE_DEFAULTS["model_type"]
+
+
+def test_user_config_overrides_system(clean_config_file, system_config_path: Path):
+    """User ~/.config layer wins where keys overlap with /etc."""
+    system_config_path.write_text(
+        json.dumps({"http_timeout": 42, "silence_duration": 1.5, "model_type": "vosk"})
+    )
+    clean_config_file.parent.mkdir(parents=True, exist_ok=True)
+    clean_config_file.write_text(json.dumps({"http_timeout": 99}))
+
+    cfg = load_app_config()
+
+    # User value beats system.
+    assert cfg["http_timeout"] == 99
+    # System keys not overridden by user are still applied.
+    assert cfg["silence_duration"] == 1.5
+    assert cfg["model_type"] == "vosk"
+
+
+def test_partial_user_override_preserves_system_keys(clean_config_file, system_config_path: Path):
+    """Pre-fix bug: a user config file used to wholesale shadow the system file.
+
+    With layered merge, setting one key in ~/.config must not erase the
+    other keys that came from /etc.
+    """
+    system_config_path.write_text(
+        json.dumps({"http_timeout": 42, "model_type": "vosk", "language": "es"})
+    )
+    clean_config_file.parent.mkdir(parents=True, exist_ok=True)
+    # User overrides exactly one key.
+    clean_config_file.write_text(json.dumps({"http_timeout": 99}))
+
+    cfg = load_app_config()
+
+    assert cfg["http_timeout"] == 99
+    assert cfg["model_type"] == "vosk"  # would have been "faster-whisper" pre-fix
+    assert cfg["language"] == "es"
+
+
+def test_malformed_system_config_does_not_block_user_layer(
+    clean_config_file, system_config_path: Path
+):
+    """A broken /etc/talkat/config.json must not prevent the user layer from applying."""
+    system_config_path.write_text("{ broken json")
+    clean_config_file.parent.mkdir(parents=True, exist_ok=True)
+    clean_config_file.write_text(json.dumps({"http_timeout": 17}))
+
+    cfg = load_app_config()
+
+    # System layer was skipped (logged), user layer still applied.
+    assert cfg["http_timeout"] == 17
+    # Defaults fill in for anything the user didn't set.
+    assert cfg["model_type"] == CODE_DEFAULTS["model_type"]

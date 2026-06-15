@@ -47,6 +47,7 @@ SOCKET_FILE = RUNTIME_DIR / "server.sock"
 
 # System-wide paths (when installed system-wide)
 SYSTEM_CONFIG_DIR = Path("/etc") / APP_NAME
+SYSTEM_CONFIG_FILE = SYSTEM_CONFIG_DIR / "config.json"
 SYSTEM_DATA_DIR = Path("/usr/share") / APP_NAME
 SYSTEM_LIB_DIR = Path("/usr/lib") / APP_NAME
 
@@ -71,15 +72,34 @@ def ensure_user_directories() -> None:
 
 
 def get_config_file() -> Path:
-    """Get the configuration file path, checking system-wide first."""
-    # Check user config first
-    if CONFIG_FILE.exists():
-        return CONFIG_FILE
+    """Return the writable user config file path.
 
-    # Check system config as fallback
-    system_config = SYSTEM_CONFIG_DIR / "config.json"
-    if system_config.exists():
-        return system_config
-
-    # Return user config path for creation
+    This is the path ``save_app_config`` writes to and the one users edit
+    by hand. For loading the effective config, callers want
+    :func:`get_config_files` — it returns the full merge chain instead of
+    a single file.
+    """
     return CONFIG_FILE
+
+
+def get_config_files() -> list[Path]:
+    """Return the config files to merge, in low-to-high precedence order.
+
+    Order is ``[/etc/talkat/config.json, ~/.config/talkat/config.json]``.
+    Files that don't exist are omitted. Callers (i.e. ``load_app_config``)
+    walk this list and apply each layer over the previous so that:
+
+    * a sysadmin-shipped ``/etc`` default (delivered by future .deb/.rpm
+      packages) sets organization-wide values
+    * the user's ``~/.config`` partially overrides those values
+
+    Today's behavior was wholesale-shadow: any user config made the
+    system config invisible. Switching to merge means a user can override
+    just one field without restating every key.
+    """
+    files: list[Path] = []
+    if SYSTEM_CONFIG_FILE.exists():
+        files.append(SYSTEM_CONFIG_FILE)
+    if CONFIG_FILE.exists():
+        files.append(CONFIG_FILE)
+    return files

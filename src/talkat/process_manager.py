@@ -242,9 +242,10 @@ class ProcessManager:
                 "process_check_interval", CODE_DEFAULTS["process_check_interval"]
             )
 
-            # Wait for process to terminate
-            start_time = time.time()
-            while time.time() - start_time < timeout:
+            # Wait for process to terminate. monotonic, not time(), so NTP
+            # slew during the grace window can't break the timeout check.
+            start_time = time.monotonic()
+            while time.monotonic() - start_time < timeout:
                 try:
                     os.kill(pid, 0)  # Check if still running
                     time.sleep(check_interval)

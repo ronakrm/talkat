@@ -1,0 +1,166 @@
+name: aur-build
+
+# Build, install, and smoke-test an Arch package generated from the current
+# commit. This isn't the real AUR PKGBUILD — that lives in
+# ssh://aur@aur.archlinux.org/talkat.git per CLAUDE.md. The PKGBUILD inlined
+# below mirrors the AUR recipe so that "can this commit be packaged + run"
+# is checked at PR time, decoupled from the AUR repo's own state.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Only run when something that affects the packaged surface changes —
+    # doc-only PRs don't need to spin up an Arch container.
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'src/**'
+      - 'talkat.service'
+      - 'talkat.desktop'
+      - 'LICENSE'
+      - '.github/workflows/aur-build.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  aur-build:
+    name: aur-build (Arch)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git uv portaudio ydotool namcap sudo
+
+      - uses: actions/checkout@v5
+
+      - name: Set up non-root makepkg user
+        # makepkg refuses to run as root; create a builder user and grant
+        # passwordless sudo for pacman so --syncdeps can install deps.
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(root) NOPASSWD: /usr/bin/pacman' \
+            > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+
+      - name: Cache pacman + uv downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/pacman/pkg
+            /home/builder/.cache/uv
+          key: aur-build-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            aur-build-${{ runner.os }}-
+
+      - name: Stage build directory and PKGBUILD
+        # `git archive` runs as root over the actions/checkout workspace,
+        # which is fine; we chown the staged dir to builder afterwards.
+        # safe.directory='*' avoids git's "dubious ownership" refusal when
+        # the checkout was performed by a different uid.
+        run: |
+          git config --global --add safe.directory '*'
+          mkdir -p /tmp/aur-build
+          git archive --format=tar.gz --prefix=talkat-CI/ HEAD \
+            -o /tmp/aur-build/talkat-CI.tar.gz
+          cat > /tmp/aur-build/PKGBUILD <<'EOF'
+          # CI smoke build — mirrors the AUR PKGBUILD recipe but points at the
+          # current commit's git archive instead of a release tarball.
+          pkgname=talkat
+          pkgver=CI
+          pkgrel=1
+          pkgdesc="Voice-to-text dictation system for Wayland Linux compositors (CI build)"
+          arch=('any')
+          url="https://github.com/ronakrm/talkat"
+          license=('MIT')
+          depends=('python' 'portaudio' 'ydotool')
+          optdepends=(
+              'wl-clipboard: Clipboard support on Wayland'
+              'xclip: Clipboard support on X11'
+              'libnotify: Desktop notifications'
+          )
+          options=('!strip')
+          makedepends=('git' 'uv')
+          source=("talkat-CI.tar.gz")
+          sha256sums=('SKIP')
+
+          build() {
+              # Install runs in package() so the venv's shebangs are baked
+              # at the final /usr/lib/talkat/.venv path.
+              :
+          }
+
+          package() {
+              cd "$srcdir/talkat-CI"
+
+              install -dm755 "$pkgdir/usr/lib/$pkgname"
+
+              # Reproducible install: --frozen reads the committed uv.lock,
+              # --no-dev skips the dev group, --no-editable installs files
+              # rather than symlinks into $srcdir.
+              UV_PROJECT_ENVIRONMENT="$pkgdir/usr/lib/$pkgname/.venv" \
+                  uv sync --frozen --no-dev --no-editable
+
+              # Wrapper delegates to the venv interpreter via python -m so
+              # we don't depend on entry-point shebang rewriting at install.
+              install -dm755 "$pkgdir/usr/bin"
+              cat > "$pkgdir/usr/bin/talkat" <<'WRAPPER'
+          #!/bin/bash
+          exec /usr/lib/talkat/.venv/bin/python -m talkat.cli "$@"
+          WRAPPER
+              chmod +x "$pkgdir/usr/bin/talkat"
+
+              install -dm755 "$pkgdir/usr/lib/systemd/user"
+              install -m644 talkat.service \
+                  "$pkgdir/usr/lib/systemd/user/talkat.service"
+              install -Dm644 talkat.desktop \
+                  "$pkgdir/usr/share/applications/talkat.desktop"
+              install -Dm644 LICENSE \
+                  "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+              install -Dm644 README.md \
+                  "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+              # In-package smoke test: the /usr/bin wrapper doesn't exist on
+              # the build host, so invoke the bundled python directly.
+              "$pkgdir/usr/lib/$pkgname/.venv/bin/python" -m talkat.cli --help \
+                  > /dev/null
+          }
+          EOF
+          chown -R builder:builder /tmp/aur-build
+          # The uv cache lives under $HOME for the builder user; if cache
+          # restore happened before useradd, make sure builder owns it.
+          chown -R builder:builder /home/builder/.cache 2>/dev/null || true
+
+      - name: makepkg (build + check + package)
+        run: |
+          cd /tmp/aur-build
+          sudo -u builder makepkg --syncdeps --noconfirm --noprogressbar
+
+      - name: Install built package
+        run: |
+          cd /tmp/aur-build
+          pacman -U --noconfirm talkat-CI-1-any.pkg.tar.zst
+
+      - name: Smoke-test installed wrapper
+        # The in-package() smoke runs the venv python directly; this runs
+        # the actual /usr/bin/talkat wrapper to prove the install layout.
+        run: talkat --help
+
+      - name: namcap lint (info only)
+        # namcap surfaces packaging smells (unused deps, missing deps,
+        # path issues). Non-failing so a stylistic warning doesn't block PRs;
+        # check the job log if you're updating the AUR PKGBUILD.
+        continue-on-error: true
+        run: |
+          cd /tmp/aur-build
+          echo "=== namcap PKGBUILD ==="
+          namcap PKGBUILD || true
+          echo "=== namcap built package ==="
+          namcap talkat-CI-1-any.pkg.tar.zst || true

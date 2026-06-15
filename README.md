@@ -7,16 +7,13 @@
 
 A voice command system with local model server for privacy and offline use. Talkat allows you to speak into any keyboard input in a Wayland-based compositor, similar to nerd-dictation but with a simpler setup.
 
-## ⚠️ Work in Progress
+## Status
 
-**This project is highly experimental and under active development.** Many components are hacky implementations that work but need refinement. Expect:
-- Rough edges and incomplete features
-- Minimal error handling in some areas
-- Code that prioritizes "working" over "elegant"
-- Frequent breaking changes
-- Untested edge cases
-
-Contributions, bug reports, and patience are all welcome!
+Pre-1.0 but actively used. CI runs tests + lint + type-check on every push, the
+codebase is mypy-strict, and the runtime surface is covered by ~370 automated
+tests. Config / CLI / on-disk layout are still subject to change before `v1.0.0`
+tags. Issues and PRs welcome — see [the v1.0.0 plan](docs/v1.0.0-plan.md) for
+what's tracked.
 
 ## System Requirements
 
@@ -90,6 +87,20 @@ The PKGBUILD itself lives in the AUR git repo
 (`ssh://aur@aur.archlinux.org/talkat.git`), not in this source tree — that's
 the standard Arch packaging convention.
 
+### Packaging — help wanted
+
+Talkat currently ships only via the AUR (Arch) and `setup.sh` (any distro
+with `uv`). Native `.deb` (Debian / Ubuntu) and `.rpm` (Fedora / openSUSE)
+packages aren't in scope for v1.0.0 but would be very welcome contributions.
+
+If you're a Debian / Ubuntu / Fedora packager and want to help, please open
+an issue tagged
+[`packaging`](https://github.com/ronakrm/talkat/issues?q=is%3Aissue+label%3Apackaging)
+or file a new one. The bundled-venv-via-uv approach used by the AUR PKGBUILD
+generalizes reasonably; the open questions are runtime model (system Python +
+deb-packaged deps vs. vendored venv), repo hosting (GitHub releases vs. PPA
+vs. Copr vs. OBS), and signing.
+
 ### One-time system setup for ydotool
 
 Regardless of install path you need ydotool wired up:
@@ -139,26 +150,17 @@ The model server runs automatically in the background after installation.
 
 ### First Time Setup: Calibration (Required)
 
-**Before using Talkat for the first time, you must calibrate your microphone:**
+**Before first use, calibrate your microphone — stay silent for 10 seconds:**
 
 ```bash
 talkat calibrate
 ```
 
-**What this does:**
-- Measures your ambient noise levels for 10 seconds
-- Calculates an optimal silence threshold for voice activity detection
-- Saves the threshold to `~/.config/talkat/config.json`
-
-**Why it's critical:**
-- Without calibration, Talkat may not detect your voice properly
-- The default threshold may be too high or too low for your environment
-- Different microphones and rooms need different thresholds
-
-**When to recalibrate:**
-- When switching to a different microphone
-- When changing to a different room or environment
-- If voice detection stops working reliably
+Calibration measures ambient noise and saves an appropriate silence
+threshold to `~/.config/talkat/config.json`. Without it, voice activity
+detection may not fire on your voice (threshold too high) or may trigger
+on background noise (threshold too low). Recalibrate when you switch
+microphones, change rooms, or detection stops working reliably.
 
 ### Short Dictation Mode (with Toggle)
 Start or stop listening for voice commands:
@@ -193,27 +195,11 @@ talkat stop-long     # Stop background long dictation
 talkat toggle-long   # Toggle: start if stopped, stop if running
 ```
 
-### Microphone Calibration
-```bash
-talkat calibrate
-```
-
-**Important**: During calibration, you should **remain silent**. The calibration process measures the ambient noise level in your environment (background noise, fan noise, etc.) to set an appropriate threshold for detecting when you're actually speaking. Do NOT speak during the 10-second calibration period.
-
-Run calibration when:
-- First setting up Talkat
-- Moving to a different environment
-- Experiencing issues with speech detection
-- Background noise levels change significantly
-
-- Check server status:
-```bash
-systemctl --user status talkat
-```
-
 ### Create Shortcuts
-Bind commands to keyboard shortcuts, e.g., for Niri:
-```
+
+Bind commands to keyboard shortcuts. For Niri:
+
+```kdl
 # Single key for toggle recording (press to start, press again to stop)
 Mod+Apostrophe { spawn "bash" "-c" "talkat listen"; }
 
@@ -224,8 +210,9 @@ Mod+Shift+Apostrophe { spawn "bash" "-c" "talkat long"; }
 Mod+Ctrl+Apostrophe { spawn "bash" "-c" "talkat toggle-long"; }
 ```
 
-For Sway, use similar bindings with `bindsym`:
-```
+For Sway:
+
+```sh
 bindsym $mod+apostrophe exec bash -c "talkat listen"
 bindsym $mod+Shift+apostrophe exec bash -c "talkat long"
 ```

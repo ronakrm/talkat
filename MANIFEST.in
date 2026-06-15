@@ -1,14 +1,16 @@
-# Include important files in source distribution
+# Include important files in source distribution.
+# PKGBUILD lives in the AUR git repo (per CLAUDE.md), not here.
 include LICENSE
 include README.md
-include talkat.desktop
-include talkat.install
+include CHANGELOG.md
 include CLAUDE.md
 include pyproject.toml
-include PKGBUILD
+include talkat.desktop
+include talkat.service
 
 # Include all Python files in src/
 recursive-include src *.py
+recursive-include src py.typed
 
 # Exclude unnecessary files
 global-exclude __pycache__

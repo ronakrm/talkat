@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-15
+
+First stable release. The CLI, on-disk layout, and wire protocol are now
+considered stable surface; future breaking changes will go through a
+deprecation cycle.
+
 ### Added
 - AI post-processing (AIPP): pipe transcripts through any OpenAI-compatible
   endpoint (Ollama, llama.cpp server, LM Studio, vLLM, OpenAI, etc.) before
@@ -28,10 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overrides the previous instead of wholesale-shadowing.
 - `TranscriptionBackend` Protocol in `backends.py` — adding a new ASR engine
   is now one Protocol implementation + one factory registration.
-- CI workflow (`.github/workflows/ci.yml`): pytest on Python 3.11–3.14,
-  ruff (format + lint), mypy, Codecov upload, opt-in live AIPP tests
-  against Ollama.
-- Comprehensive test suite: ~350 tests covering config, security, process
+- CI workflows: `.github/workflows/ci.yml` (pytest on Python 3.11–3.14, ruff
+  format + lint, mypy, Codecov upload, opt-in live AIPP tests against Ollama)
+  and `.github/workflows/aur-build.yml` (inline PKGBUILD against PR HEAD,
+  makepkg in an archlinux:base-devel container, install + smoke-test, namcap
+  info-only).
+- Comprehensive test suite: ~370 tests covering config, security, process
   manager, VAD, long mode, file processor, CLI dispatch, language plumbing,
   AIPP, model manager, model server, and integration paths over real
   Flask + waitress on UDS.

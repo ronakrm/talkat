@@ -40,6 +40,15 @@ CODE_DEFAULTS: dict[str, Any] = {
     "file_processing_timeout_base": 30,  # Base timeout for file processing (seconds)
     # Server limits
     "max_upload_size_mb": 100,  # Reject /transcribe_file uploads larger than this
+    # Audio preprocessing (server-side, applied before ASR).
+    "audio_normalize_gain": True,  # RMS-target gain scaling for quiet/loud inputs
+    "audio_target_rms_dbfs": -20.0,  # Target RMS level after normalization
+    "audio_max_gain_db": 20.0,  # Hard cap to keep noise from being amplified
+    # Long-form segmentation: audio longer than this is split at energy
+    # minima and transcribed in pieces. Faster-Whisper handles long audio
+    # internally, but very long single passes still hit memory and
+    # position-embedding edge cases — segmenting bounds peak cost per pass.
+    "max_segment_seconds": 480.0,  # 8 minutes — well under any single-pass cliff
     # Process Management Timeouts
     "process_stop_timeout": 5.0,  # Max time to wait for process to stop
     "lock_acquire_timeout": 1.0,  # Max time to wait for lock acquisition

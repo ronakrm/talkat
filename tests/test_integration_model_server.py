@@ -195,7 +195,14 @@ def test_stream_happy_path_returns_backend_response(
         r = c.post("http://talkat/transcribe_stream", content=metadata + audio)
 
     assert r.status_code == 200, r.text
-    assert r.json() == {"text": "hello from fake"}
+    body = r.json()
+    assert body["text"] == "hello from fake"
+    # Audio metadata now travels alongside the text — three fields that
+    # drive diagnostics. They're floats, but here we only sanity-check
+    # presence and rough shape; the exact ASR time is hardware-dependent.
+    assert body["audio_duration"] == pytest.approx(0.1, abs=0.01)
+    assert body["applied_gain_db"] >= 0.0
+    assert body["asr_seconds"] >= 0.0
     assert len(backend.calls) == 1
     # The audio buffer was decoded — 1600 int16 samples → 1600 floats.
     assert backend.calls[0]["audio_len"] == 1600
@@ -220,7 +227,7 @@ def test_stream_per_request_language_overrides_default(
 def test_stream_empty_audio_short_circuits(
     live_server: tuple[str, FakeBackend],
 ) -> None:
-    """No audio after the metadata line → ``{"text": ""}`` without hitting the backend."""
+    """No audio after the metadata line → empty text without hitting the backend."""
     socket_path, backend = live_server
     metadata = json.dumps({"rate": 16000}).encode("utf-8") + b"\n"
 
@@ -228,7 +235,13 @@ def test_stream_empty_audio_short_circuits(
         r = c.post("http://talkat/transcribe_stream", content=metadata)
 
     assert r.status_code == 200
-    assert r.json() == {"text": ""}
+    body = r.json()
+    assert body["text"] == ""
+    # Short-circuit path returns the same metadata shape with zeros so
+    # clients don't need a special-case for the empty path.
+    assert body["audio_duration"] == 0.0
+    assert body["applied_gain_db"] == 0.0
+    assert body["asr_seconds"] == 0.0
     assert backend.calls == []
 
 
@@ -293,7 +306,10 @@ def test_transcribe_file_happy_path(live_server: tuple[str, FakeBackend], tmp_pa
             )
 
     assert r.status_code == 200, r.text
-    assert r.json() == {"text": "hello from fake"}
+    body = r.json()
+    assert body["text"] == "hello from fake"
+    assert body["audio_duration"] == pytest.approx(0.25, abs=0.01)
+    assert body["asr_seconds"] >= 0.0
     assert len(backend.calls) == 1
     # 0.25s @ 16kHz mono = 4000 samples after librosa resample/load
     assert backend.calls[0]["audio_len"] == pytest.approx(4000, abs=10)

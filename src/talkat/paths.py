@@ -38,6 +38,7 @@ VOSK_CACHE_DIR = MODEL_CACHE_DIR / "vosk"
 DATA_DIR = XDG_DATA_HOME / APP_NAME
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 LOG_DIR = DATA_DIR / "logs"
+DIAGNOSTICS_DIR = DATA_DIR / "diagnostics"
 
 # Runtime directories
 RUNTIME_DIR = XDG_RUNTIME_DIR / APP_NAME
@@ -63,6 +64,7 @@ def ensure_user_directories() -> None:
         DATA_DIR,
         TRANSCRIPT_DIR,
         LOG_DIR,
+        DIAGNOSTICS_DIR,
         RUNTIME_DIR,
         PID_DIR,
         LOCK_DIR,

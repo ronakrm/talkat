@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from flask import Flask, jsonify, request
 from flask.typing import ResponseReturnValue
 from waitress import serve
 
+from talkat.audio_utils import normalize_gain
 from talkat.backends import BackendLoadError, TranscriptionBackend, create_backend
 from talkat.config import CODE_DEFAULTS, load_app_config
 from talkat.logging_config import get_logger
@@ -142,6 +144,22 @@ def _resolve_language(raw: object) -> str:
     return validate_language(raw)
 
 
+def _maybe_normalize(audio: np.ndarray) -> tuple[np.ndarray, float]:
+    """Apply RMS gain normalization if enabled in config; otherwise no-op.
+
+    Loaded per-request so a config edit takes effect on the next call
+    without a server restart. Cheap (a dict lookup + RMS scan); the
+    cost dominates only on huge file uploads, where the existing decode
+    step already dwarfs it.
+    """
+    config = load_app_config()
+    if not config.get("audio_normalize_gain", CODE_DEFAULTS["audio_normalize_gain"]):
+        return audio, 0.0
+    target = float(config.get("audio_target_rms_dbfs", CODE_DEFAULTS["audio_target_rms_dbfs"]))
+    max_gain = float(config.get("audio_max_gain_db", CODE_DEFAULTS["audio_max_gain_db"]))
+    return normalize_gain(audio, target_rms_dbfs=target, max_gain_db=max_gain)
+
+
 @app.errorhandler(413)
 def _request_too_large(_e: Exception) -> ResponseReturnValue:
     limit_mb = app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024)
@@ -184,17 +202,32 @@ def transcribe_audio_stream() -> ResponseReturnValue:
             return jsonify({"error": "Client disconnected"}), 499
 
         if not audio_buffer:
-            return jsonify({"text": ""})
+            return jsonify(
+                {"text": "", "audio_duration": 0.0, "applied_gain_db": 0.0, "asr_seconds": 0.0}
+            )
 
         audio_np = np.frombuffer(bytes(audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
         audio_np = np.ascontiguousarray(audio_np, dtype=np.float32)
+        duration = float(audio_np.size) / 16000.0
 
+        audio_np, applied_gain_db = _maybe_normalize(audio_np)
+
+        t0 = time.perf_counter()
         text_result = _service.backend.transcribe(
             audio_np,
             language=language,
             initial_prompt=_service.get_initial_prompt(),
         )
-        return jsonify({"text": text_result})
+        asr_seconds = time.perf_counter() - t0
+
+        return jsonify(
+            {
+                "text": text_result,
+                "audio_duration": duration,
+                "applied_gain_db": applied_gain_db,
+                "asr_seconds": asr_seconds,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error during streaming transcription: {e}")
@@ -255,14 +288,25 @@ def transcribe_file() -> ResponseReturnValue:
             except OSError:
                 pass
 
+        audio_data, applied_gain_db = _maybe_normalize(audio_data)
+
+        t0 = time.perf_counter()
         text_result = _service.backend.transcribe(
             audio_data,
             language=language,
             initial_prompt=_service.get_initial_prompt(),
         )
+        asr_seconds = time.perf_counter() - t0
 
         logger.info(f"Transcription result: {len(text_result)} characters")
-        return jsonify({"text": text_result})
+        return jsonify(
+            {
+                "text": text_result,
+                "audio_duration": duration,
+                "applied_gain_db": applied_gain_db,
+                "asr_seconds": asr_seconds,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error during file transcription: {e}")
@@ -280,8 +324,14 @@ def transcribe_file() -> ResponseReturnValue:
 @app.route("/health", methods=["GET"])
 def health_check() -> ResponseReturnValue:
     if _service.backend is not None:
+        config = load_app_config()
         return jsonify(
-            {"status": "ok", "model_type": _service.model_type, "message": "Model loaded"}
+            {
+                "status": "ok",
+                "model_type": _service.model_type,
+                "model_name": config.get("model_name"),
+                "message": "Model loaded",
+            }
         ), 200
     else:
         return jsonify({"status": "error", "message": "Model not loaded"}), 500

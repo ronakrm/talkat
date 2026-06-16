@@ -400,6 +400,9 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         "lock_retry_interval": (0, 10),
         "process_check_interval": (0, 10),
         "background_process_delay": (0, 60),
+        "audio_target_rms_dbfs": (-60, 0),
+        "audio_max_gain_db": (0, 60),
+        "max_segment_seconds": (5, 3600),
     }
     for param, (min_val, max_val) in numeric_params.items():
         if param in config:
@@ -410,7 +413,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
             except (ValueError, TypeError) as e:
                 raise ValueError(f"Invalid {param}: {config[param]}") from e
 
-    bool_params = ["clipboard_on_long", "save_transcripts"]
+    bool_params = ["clipboard_on_long", "save_transcripts", "audio_normalize_gain"]
     for param in bool_params:
         if param in config and not isinstance(config[param], bool):
             raise ValueError(f"{param} must be boolean, got {type(config[param])}")

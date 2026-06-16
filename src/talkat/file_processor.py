@@ -3,14 +3,30 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from .clipboard import copy_to_clipboard
+from .diagnostics import build_record, write_record
 from .logging_config import get_logger
 from .security import validate_file_path
 
 logger = get_logger(__name__)
+
+
+# Side-channel for the most recent file transcribe call. The public
+# ``transcribe_audio_file`` keeps its ``(text, duration)`` return shape
+# (tests and external callers depend on it); commands that want the
+# server's full response (applied_gain_db, asr_seconds, etc.) read this
+# right after the call. Resetting it on each call keeps stale values
+# from leaking between transcriptions.
+_LAST_RESPONSE: dict[str, Any] = {}
+
+
+def get_last_response_metadata() -> dict[str, Any]:
+    """Return server metadata from the most recent transcribe_audio_file call."""
+    return dict(_LAST_RESPONSE)
 
 
 def _make_client(socket_path: str, timeout: float) -> httpx.Client:
@@ -114,6 +130,13 @@ def transcribe_audio_file(
         result = response.json()
         transcription = result.get("text", "").strip()
 
+        global _LAST_RESPONSE
+        _LAST_RESPONSE = {
+            "audio_duration": float(result.get("audio_duration", duration) or duration),
+            "applied_gain_db": float(result.get("applied_gain_db", 0.0) or 0.0),
+            "asr_seconds": float(result.get("asr_seconds", 0.0) or 0.0),
+        }
+
         if not transcription:
             logger.warning("No speech detected in the audio file")
             return "", duration
@@ -203,9 +226,18 @@ def process_audio_file_command(
     try:
         # Transcribe the file
         transcription, duration = transcribe_audio_file(file_path, language=language)
+        server_meta = get_last_response_metadata()
 
         if not transcription:
             logger.warning("No speech detected in the audio file")
+            _write_file_diagnostics(
+                file_path=file_path,
+                transcription="",
+                duration=duration,
+                server_meta=server_meta,
+                postprocess=postprocess,
+                error=None,
+            )
             return 1
 
         if postprocess:
@@ -238,11 +270,62 @@ def process_audio_file_command(
         logger.info(f"  Words: {len(transcription.split())}")
         logger.info(f"  Characters: {len(transcription)}")
 
+        _write_file_diagnostics(
+            file_path=file_path,
+            transcription=transcription,
+            duration=duration,
+            server_meta=server_meta,
+            postprocess=postprocess,
+            error=None,
+        )
+
         return 0
 
     except Exception as e:
         logger.error(f"Error: {e}")
+        _write_file_diagnostics(
+            file_path=file_path,
+            transcription="",
+            duration=0.0,
+            server_meta={},
+            postprocess=postprocess,
+            error=str(e),
+        )
         return 1
+
+
+def _write_file_diagnostics(
+    *,
+    file_path: str,
+    transcription: str,
+    duration: float,
+    server_meta: dict[str, Any],
+    postprocess: str | None,
+    error: str | None,
+) -> None:
+    """Write a diagnostics record for a file-mode transcription. Advisory."""
+    try:
+        from .config import CODE_DEFAULTS, load_app_config
+
+        config = load_app_config()
+        model_type = str(config.get("model_type", CODE_DEFAULTS["model_type"]))
+        model_name = str(config.get("model_name", CODE_DEFAULTS["model_name"]))
+        record = build_record(
+            mode="file",
+            audio_duration=float(server_meta.get("audio_duration", duration)),
+            asr_seconds=float(server_meta.get("asr_seconds", 0.0)),
+            applied_gain_db=float(server_meta.get("applied_gain_db", 0.0)),
+            model_type=model_type,
+            model_name=model_name,
+            transcript_chars=len(transcription),
+            transcript_words=len(transcription.split()) if transcription else 0,
+            postprocess_profile=postprocess,
+            errors=[error] if error else [],
+            extra={"input_file": file_path},
+        )
+        write_record(record)
+    except Exception as e:  # noqa: BLE001 — diagnostics are advisory
+        logger.debug(f"File diagnostics skipped (non-fatal): {e}")
 
 
 def batch_process_files(

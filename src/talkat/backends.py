@@ -25,6 +25,13 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from .audio_utils import segment_long_audio
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
+
+_SAMPLE_RATE = 16000
+
 
 class BackendLoadError(RuntimeError):
     """Raised when a backend can't initialize (missing model file, etc.)."""
@@ -98,6 +105,7 @@ class FasterWhisperBackend:
     def __init__(self) -> None:
         self._model: Any = None
         self._model_name: str = ""
+        self._max_segment_seconds: float = 480.0
 
     def load(self, config: dict[str, Any]) -> None:
         from faster_whisper import WhisperModel
@@ -109,6 +117,9 @@ class FasterWhisperBackend:
         device = config.get("fw_device", CODE_DEFAULTS["fw_device"])
         compute_type = config.get("fw_compute_type", CODE_DEFAULTS["fw_compute_type"])
         device_index = config.get("fw_device_index", CODE_DEFAULTS["fw_device_index"])
+        self._max_segment_seconds = float(
+            config.get("max_segment_seconds", CODE_DEFAULTS["max_segment_seconds"])
+        )
 
         kwargs: dict[str, Any] = {
             "device": device,
@@ -124,17 +135,12 @@ class FasterWhisperBackend:
         except Exception as e:
             raise BackendLoadError(f"Could not load faster-whisper '{model_name}': {e}") from e
 
-    def transcribe(
+    def _transcribe_one(
         self,
         audio: np.ndarray,
-        language: str = "en",
-        initial_prompt: str | None = None,
+        language: str,
+        initial_prompt: str | None,
     ) -> str:
-        if self._model is None:
-            raise RuntimeError("FasterWhisperBackend.transcribe called before load()")
-        if len(audio) == 0:
-            return ""
-
         # faster-whisper uses ``language=None`` for autodetect. We accept
         # the ``"auto"`` token from upstream config / CLI as the Protocol
         # surface stays string-typed.
@@ -148,6 +154,30 @@ class FasterWhisperBackend:
             initial_prompt=initial_prompt,
         )
         return "".join(seg.text for seg in segments).strip()
+
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        language: str = "en",
+        initial_prompt: str | None = None,
+    ) -> str:
+        if self._model is None:
+            raise RuntimeError("FasterWhisperBackend.transcribe called before load()")
+        if len(audio) == 0:
+            return ""
+
+        pieces = segment_long_audio(
+            audio,
+            sample_rate=_SAMPLE_RATE,
+            max_segment_seconds=self._max_segment_seconds,
+        )
+        if len(pieces) > 1:
+            logger.info(
+                f"Long input ({audio.size / _SAMPLE_RATE:.1f}s): "
+                f"transcribing in {len(pieces)} segments."
+            )
+        texts = [self._transcribe_one(seg, language, initial_prompt) for seg in pieces]
+        return " ".join(t for t in texts if t).strip()
 
     def warm_up(self) -> None:
         if self._model is None:
@@ -173,6 +203,7 @@ class VoskBackend:
 
     def __init__(self) -> None:
         self._model: Any = None
+        self._max_segment_seconds: float = 480.0
 
     def load(self, config: dict[str, Any]) -> None:
         import vosk
@@ -182,6 +213,9 @@ class VoskBackend:
         model_name = config.get("model_name", CODE_DEFAULTS["model_name"])
         base_dir = config.get("vosk_model_base_dir", CODE_DEFAULTS["vosk_model_base_dir"])
         path = os.path.join(os.path.expanduser(base_dir), model_name)
+        self._max_segment_seconds = float(
+            config.get("max_segment_seconds", CODE_DEFAULTS["max_segment_seconds"])
+        )
         if not os.path.exists(path):
             raise BackendLoadError(f"Vosk model not found at {path}")
 
@@ -190,24 +224,38 @@ class VoskBackend:
         except Exception as e:
             raise BackendLoadError(f"Could not load Vosk model at {path}: {e}") from e
 
+    def _transcribe_one(self, audio: np.ndarray) -> str:
+        import vosk
+
+        recognizer = vosk.KaldiRecognizer(self._model, _SAMPLE_RATE)
+        audio_int16 = (audio * 32768.0).astype(np.int16)
+        recognizer.AcceptWaveform(audio_int16.tobytes())
+        result = json.loads(recognizer.FinalResult())
+        return str(result.get("text", "")).strip()
+
     def transcribe(
         self,
         audio: np.ndarray,
         language: str = "en",  # noqa: ARG002 — see class docstring
         initial_prompt: str | None = None,  # noqa: ARG002 — see class docstring
     ) -> str:
-        import vosk
-
         if self._model is None:
             raise RuntimeError("VoskBackend.transcribe called before load()")
         if len(audio) == 0:
             return ""
 
-        recognizer = vosk.KaldiRecognizer(self._model, 16000)
-        audio_int16 = (audio * 32768.0).astype(np.int16)
-        recognizer.AcceptWaveform(audio_int16.tobytes())
-        result = json.loads(recognizer.FinalResult())
-        return str(result.get("text", "")).strip()
+        pieces = segment_long_audio(
+            audio,
+            sample_rate=_SAMPLE_RATE,
+            max_segment_seconds=self._max_segment_seconds,
+        )
+        if len(pieces) > 1:
+            logger.info(
+                f"Long input ({audio.size / _SAMPLE_RATE:.1f}s): "
+                f"transcribing in {len(pieces)} segments."
+            )
+        texts = [self._transcribe_one(seg) for seg in pieces]
+        return " ".join(t for t in texts if t).strip()
 
     def warm_up(self) -> None:
         import vosk

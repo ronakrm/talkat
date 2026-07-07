@@ -40,8 +40,13 @@ TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 LOG_DIR = DATA_DIR / "logs"
 DIAGNOSTICS_DIR = DATA_DIR / "diagnostics"
 
-# Runtime directories
-RUNTIME_DIR = XDG_RUNTIME_DIR / APP_NAME
+# Runtime directories.
+# TALKAT_RUNTIME_DIR relocates the whole runtime dir — server socket, PID
+# files, and locks move together. Its purpose is dev isolation: a checkout
+# run via dev.sh gets its own socket and PIDs and can never toggle, stop, or
+# out-bind the installed daily-driver service.
+_RUNTIME_OVERRIDE = os.environ.get("TALKAT_RUNTIME_DIR")
+RUNTIME_DIR = Path(_RUNTIME_OVERRIDE) if _RUNTIME_OVERRIDE else XDG_RUNTIME_DIR / APP_NAME
 PID_DIR = RUNTIME_DIR
 LOCK_DIR = RUNTIME_DIR
 SOCKET_FILE = RUNTIME_DIR / "server.sock"

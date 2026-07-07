@@ -210,11 +210,21 @@ def test_validate_command_rejects_empty():
         validate_command([])
 
 
-def test_validate_command_rejects_shell_metacharacters():
+def test_validate_command_allows_metacharacters_in_arguments():
+    """Arguments are inert data under shell=False — transcripts like
+    "$20 (roughly); done" must pass through so they can be typed/notified."""
+    cmd = ["ydotool", "type", "evil; rm -rf /"]
+    assert validate_command(cmd) == cmd
+    cmd = ["notify-send", "Talkat", "$20 (roughly) & more"]
+    assert validate_command(cmd) == cmd
+
+
+def test_validate_command_rejects_metacharacters_in_command_name():
+    """The executable name is the one place a metacharacter means taint."""
     with pytest.raises(SecurityError):
-        validate_command(["ydotool", "type", "evil; rm -rf /"])
+        validate_command(["ydotool; rm -rf /", "type", "hi"])
     with pytest.raises(SecurityError):
-        validate_command(["ydotool", "type", "$(curl evil)"])
+        validate_command(["$(curl evil)", "hi"])
 
 
 def test_validate_command_passes_whitelisted_command():
@@ -412,19 +422,17 @@ def test_safe_subprocess_run_check_can_be_overridden(monkeypatch: pytest.MonkeyP
     assert kwargs["check"] is True
 
 
-def test_safe_subprocess_run_rejects_shell_metacharacters_before_running(
+def test_safe_subprocess_run_rejects_tainted_command_name_before_running(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """validate_command must run before subprocess.run — dangerous chars never spawn.
-
-    If a metacharacter slips into the args, validate_command raises
-    SecurityError and subprocess.run is never invoked. This is the defence-
-    in-depth check: even if sanitize_text_for_typing missed something,
-    safe_subprocess_run won't execute it.
+    """validate_command must run before subprocess.run — a metacharacter in
+    the executable name means something tainted was spliced into the command,
+    and nothing may spawn. Metacharacters in *arguments* are legitimate data
+    (transcripts) and do spawn — covered by the validate_command tests.
     """
     fake = _patch_subprocess_run(monkeypatch)
     with pytest.raises(SecurityError):
-        safe_subprocess_run(["ydotool", "type", "evil; rm -rf /"])
+        safe_subprocess_run(["ydotool; rm -rf /", "type", "hi"])
     fake.assert_not_called()
 
 

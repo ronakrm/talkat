@@ -309,6 +309,11 @@ def main() -> None:
 
     subparsers.add_parser("server", help="Start the model server")
     subparsers.add_parser("calibrate", help="Calibrate microphone threshold")
+    subparsers.add_parser(
+        "doctor",
+        help="Check the environment: install origin, PATH/unit shadowing, "
+        "server health, audio devices, desktop tools",
+    )
 
     subparsers.add_parser(
         "install-service",
@@ -454,6 +459,10 @@ def main() -> None:
         from .main import run_calibrate
 
         sys.exit(run_calibrate())
+    elif args.command == "doctor":
+        from .doctor import run_doctor
+
+        sys.exit(run_doctor())
     elif args.command == "install-service":
         from .service import install_service
 

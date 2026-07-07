@@ -23,6 +23,23 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
+# A system-packaged talkat (e.g. the AUR package) and a uv-tool install don't
+# mix well: ~/.local/bin shadows /usr/bin, and the user systemd unit shadows
+# the packaged one — the result is a stale dev copy silently becoming the
+# daily driver. If a packaged install exists, this script is almost never
+# what you want; ./dev.sh runs the checkout without touching your install.
+if [ -e /usr/lib/systemd/user/talkat.service ] || [ -x /usr/bin/talkat ]; then
+    echo "WARNING: a system-packaged talkat is already installed (/usr/bin/talkat)."
+    echo "Proceeding will SHADOW it with a per-user copy of this checkout, on PATH"
+    echo "and in systemd. For development, use ./dev.sh instead — it runs the"
+    echo "checkout against an isolated socket and leaves your install alone."
+    read -r -p "Shadow the packaged install anyway? [y/N] " reply
+    case "$reply" in
+        [yY]*) ;;
+        *) echo "Aborted. Try: ./dev.sh server"; exit 1 ;;
+    esac
+fi
+
 echo "Installing talkat with uv tool install..."
 uv tool install --reinstall .
 

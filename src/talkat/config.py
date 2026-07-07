@@ -21,7 +21,6 @@ CODE_DEFAULTS: dict[str, Any] = {
     # Audio and Recognition Settings
     "silence_threshold": 200.0,
     "silence_duration": 3.0,  # Seconds of silence before stopping recording
-    "pre_speech_padding": 0.3,  # Seconds of audio to keep before speech starts
     "silence_threshold_fallback": 500.0,  # Fallback threshold when auto-detection fails
     "silence_threshold_min": 50.0,  # Minimum allowed silence threshold
     "silence_threshold_max": 5000.0,  # Maximum allowed silence threshold

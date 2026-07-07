@@ -194,14 +194,17 @@ def test_language_flag_present_on_subcommand(subcommand: str):
     def fake_batch(*_a: object, **_kw: object) -> int:
         return 0
 
-    # Stub every dispatch sink so main() returns cleanly regardless of subcommand.
+    # Stub every dispatch sink so main() returns cleanly regardless of
+    # subcommand. cli.main imports the file/batch handlers lazily from
+    # file_processor at dispatch time, so that module is the patch point.
+    import talkat.file_processor as fp_mod
     import talkat.main as main_mod
 
     monkeypatch_attrs = [
         (main_mod, "listen_once", fake_listen_once),
         (main_mod, "listen_continuous", fake_listen_continuous),
-        (cli_mod, "process_audio_file_command", fake_file),
-        (cli_mod, "batch_process_files", fake_batch),
+        (fp_mod, "process_audio_file_command", fake_file),
+        (fp_mod, "batch_process_files", fake_batch),
     ]
 
     # Stash & restore — pytest's monkeypatch fixture isn't available in a
@@ -325,7 +328,7 @@ def patched_audio(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[_FakePyAudio
     from talkat import record as record_mod
 
     monkeypatch.setattr(record_mod.pyaudio, "PyAudio", _FakePyAudio)
-    monkeypatch.setattr(record_mod, "find_microphone", lambda: 0)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: 0)
     _FakePyAudio._next_chunks = [_loud_chunk()] * 3 + [_silent_chunk()] * 30
     yield _FakePyAudio
 

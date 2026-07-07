@@ -4,13 +4,14 @@ The microphone and PyAudio are stubbed out; we drive the iterator with
 synthetic int16 chunks of either silence (volume ~0) or speech (volume well
 above the threshold). What we assert:
 
-  - no-VAD mode (threshold=0) yields every chunk
-  - pure silence in VAD mode yields nothing
-  - speech triggers pre-roll inclusion (buffered silent chunks are yielded
-    when speech first starts)
+  - every chunk is yielded from stream-open (the threshold never gates what
+    is SENT — that's how utterance beginnings got clipped; it only decides
+    when to stop)
   - silence_duration ends iteration after speech
+  - pure silence never triggers the silence auto-stop (runs to max_duration)
   - max_duration caps iteration
   - stop_event short-circuits the loop
+  - a failed stream-open is retried once with a fresh PyAudio instance
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ def patched_pyaudio(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[FakePyAudi
     from talkat import record as record_mod
 
     monkeypatch.setattr(record_mod.pyaudio, "PyAudio", FakePyAudio)
-    monkeypatch.setattr(record_mod, "find_microphone", lambda: 0)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: 0)
     yield FakePyAudio
 
 
@@ -96,7 +97,6 @@ def _drive_session(
     threshold: float,
     silence_duration: float = 0.5,
     max_duration: float | None = 1.0,
-    pre_speech_padding: float = 0.06,
     stop_event: threading.Event | None = None,
 ) -> list[bytes]:
     """Open an AudioSession with the given chunks and return everything it yields."""
@@ -108,7 +108,6 @@ def _drive_session(
         threshold=threshold,
         silence_duration=silence_duration,
         max_duration=max_duration,
-        pre_speech_padding=pre_speech_padding,
         chunk_size_ms=30,
         stop_event=stop_event,
     ) as session:
@@ -135,32 +134,29 @@ def test_no_vad_mode_yields_every_chunk(patched_pyaudio):
     assert len(yielded) == 5
 
 
-def test_pure_silence_yields_nothing(patched_pyaudio):
-    """In VAD mode, a pure-silence stream must not yield any chunks."""
+def test_pure_silence_streams_until_max_duration(patched_pyaudio):
+    """A pure-silence stream is still sent (server VAD handles it) and only
+    max_duration ends it — the silence auto-stop needs speech first."""
     chunks = [_silent_chunk() for _ in range(20)]
     yielded = _drive_session(
         patched_pyaudio,
         chunks,
         threshold=200,
         silence_duration=0.2,
-        max_duration=0.5,  # 0.5 * 16000 / 480 ≈ 16 chunks read
+        max_duration=0.48,  # 0.48 * 16000 / 480 = 16 chunks exactly
     )
-    assert yielded == []
+    assert len(yielded) == 16
 
 
-def test_speech_triggers_pre_roll(patched_pyaudio):
-    """When speech is detected, the pre-speech buffer must be flushed first.
+def test_all_audio_streamed_from_open_including_leading_silence(patched_pyaudio):
+    """Audio before the VAD trigger must be yielded too, in order.
 
-    With pre_speech_padding=0.06 (2 chunks), the two silent chunks immediately
-    preceding the first loud chunk should appear in the yielded sequence — they
-    can't have been generated mid-speech (loud chunks differ byte-for-byte from
-    the silent ones we feed in).
+    This is the cut-off-beginnings fix: the threshold must never gate what is
+    sent. Leading silent chunks (and with them, quiet speech onsets an RMS
+    threshold would miss) all reach the server.
     """
     silent = _silent_chunk()
     loud = _loud_chunk()
-    # 3 silent → only the last 2 survive in the deque(maxlen=2).
-    # Then 2 loud → speech triggers; pre-roll + loud chunks yielded.
-    # Then 20 silent → enough to trigger silence_duration exit.
     chunks = [silent] * 3 + [loud] * 2 + [silent] * 20
 
     yielded = _drive_session(
@@ -169,13 +165,10 @@ def test_speech_triggers_pre_roll(patched_pyaudio):
         threshold=200,
         silence_duration=0.2,
         max_duration=2.0,
-        pre_speech_padding=0.06,
     )
 
-    # First yielded chunk must be silent (pre-roll).
-    assert yielded[0] == silent, "pre-roll silent chunk should come first"
-    # The loud chunks must show up.
-    assert loud in yielded
+    # The full leading-silence prefix and the speech must be present, in order.
+    assert yielded[:5] == [silent, silent, silent, loud, loud]
 
 
 def test_silence_duration_ends_iteration_after_speech(patched_pyaudio):
@@ -193,7 +186,6 @@ def test_silence_duration_ends_iteration_after_speech(patched_pyaudio):
         threshold=200,
         silence_duration=0.2,
         max_duration=5.0,
-        pre_speech_padding=0.06,
     )
 
     # We should NOT have yielded all 100 trailing silent chunks — silence
@@ -261,7 +253,7 @@ def test_audiosession_raises_when_no_microphone(patched_pyaudio, monkeypatch):
     from talkat import record as record_mod
     from talkat.record import AudioSession, AudioSessionError
 
-    monkeypatch.setattr(record_mod, "find_microphone", lambda: None)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: None)
 
     with pytest.raises(AudioSessionError):
         with AudioSession(
@@ -273,13 +265,67 @@ def test_audiosession_raises_when_no_microphone(patched_pyaudio, monkeypatch):
             pass
 
 
+def test_audiosession_retries_open_with_fresh_instance(patched_pyaudio, monkeypatch):
+    """A transient stream-open failure must be retried on a new PyAudio instance.
+
+    This is the [Errno -9998] fix: PipeWire topology churn can invalidate a
+    device index between snapshots; one retry with a fresh enumeration
+    absorbs it.
+    """
+    from talkat import record as record_mod
+    from talkat.record import AudioSession
+
+    instances: list[object] = []
+
+    class FlakyPyAudio(FakePyAudio):
+        def open(self, **kwargs: object) -> FakeStream:
+            instances.append(self)
+            if len(instances) == 1:
+                raise OSError(-9998, "Invalid number of channels")
+            return super().open(**kwargs)
+
+    monkeypatch.setattr(record_mod.pyaudio, "PyAudio", FlakyPyAudio)
+    monkeypatch.setattr(record_mod.AudioSession, "OPEN_RETRY_DELAY_S", 0.0)
+    FlakyPyAudio._next_chunks = [_silent_chunk()] * 3  # type: ignore[attr-defined]
+
+    with AudioSession(
+        threshold=0,
+        silence_duration=0.5,
+        max_duration=0.09,
+        chunk_size_ms=30,
+    ) as session:
+        yielded = list(iter(session))
+
+    assert len(instances) == 2, "expected one retry on a fresh PyAudio instance"
+    assert instances[0] is not instances[1]
+    assert isinstance(instances[0], FlakyPyAudio) and instances[0].terminated
+    assert len(yielded) == 3
+
+
+def test_audiosession_raises_after_all_open_attempts_fail(patched_pyaudio, monkeypatch):
+    """Persistent open failure surfaces as AudioSessionError after retries."""
+    from talkat import record as record_mod
+    from talkat.record import AudioSession, AudioSessionError
+
+    class AlwaysFailingPyAudio(FakePyAudio):
+        def open(self, **kwargs: object) -> FakeStream:
+            raise OSError(-9998, "Invalid number of channels")
+
+    monkeypatch.setattr(record_mod.pyaudio, "PyAudio", AlwaysFailingPyAudio)
+    monkeypatch.setattr(record_mod.AudioSession, "OPEN_RETRY_DELAY_S", 0.0)
+
+    with pytest.raises(AudioSessionError):
+        with AudioSession(threshold=0, silence_duration=0.5, max_duration=0.09):
+            pass
+
+
 # ---------------------------------------------------------------------------
 # calibrate_microphone — same PyAudio stub pattern as AudioSession but
 # different chunk size (default 1024) and no VAD.
 # ---------------------------------------------------------------------------
 
 
-CALIBRATE_CHUNK_SAMPLES = 1024  # default config.audio_chunk_size
+CALIBRATE_CHUNK_SAMPLES = 1024  # calibrate_microphone's fixed CHUNK
 
 
 def _calibrate_chunk(amplitude: int) -> bytes:
@@ -295,7 +341,7 @@ def patched_pyaudio_for_calibrate(
     from talkat import record as record_mod
 
     monkeypatch.setattr(record_mod.pyaudio, "PyAudio", FakePyAudio)
-    monkeypatch.setattr(record_mod, "find_microphone", lambda: 0)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: 0)
     monkeypatch.setattr(record_mod, "safe_subprocess_run", lambda *_a, **_k: None)
     yield FakePyAudio
 
@@ -335,12 +381,13 @@ def test_calibrate_returns_p95_for_typical_noise(patched_pyaudio_for_calibrate):
 
 
 def test_calibrate_falls_back_when_no_microphone(monkeypatch: pytest.MonkeyPatch):
-    """No mic → returns silence_threshold_fallback without touching PyAudio."""
+    """No mic → returns silence_threshold_fallback (and terminates PyAudio)."""
     from talkat import record as record_mod
     from talkat.config import CODE_DEFAULTS
     from talkat.record import calibrate_microphone
 
-    monkeypatch.setattr(record_mod, "find_microphone", lambda: None)
+    monkeypatch.setattr(record_mod.pyaudio, "PyAudio", FakePyAudio)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: None)
     monkeypatch.setattr(record_mod, "safe_subprocess_run", lambda *_a, **_k: None)
 
     threshold = calibrate_microphone(duration=1)
@@ -364,7 +411,7 @@ def test_calibrate_falls_back_when_stream_open_fails(monkeypatch: pytest.MonkeyP
             pass
 
     monkeypatch.setattr(record_mod.pyaudio, "PyAudio", FailingPyAudio)
-    monkeypatch.setattr(record_mod, "find_microphone", lambda: 0)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: 0)
     monkeypatch.setattr(record_mod, "safe_subprocess_run", lambda *_a, **_k: None)
 
     threshold = calibrate_microphone(duration=1)

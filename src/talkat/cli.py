@@ -5,7 +5,6 @@ import os
 import sys
 from typing import Any
 
-from .file_processor import batch_process_files, process_audio_file_command
 from .logging_config import get_logger, setup_logging
 from .paths import ensure_user_directories
 from .process_manager import LockTimeout, ProcessManager
@@ -466,6 +465,8 @@ def main() -> None:
     elif args.command == "model":
         sys.exit(_run_model_command(args))
     elif args.command == "file":
+        from .file_processor import process_audio_file_command
+
         sys.exit(
             process_audio_file_command(
                 args.input,
@@ -477,6 +478,8 @@ def main() -> None:
             )
         )
     elif args.command == "batch":
+        from .file_processor import batch_process_files
+
         sys.exit(
             batch_process_files(
                 args.files,

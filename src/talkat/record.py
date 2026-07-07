@@ -3,6 +3,7 @@ import contextlib
 import os
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from types import TracebackType
 
@@ -53,7 +54,7 @@ class AudioSessionError(RuntimeError):
 
 
 class AudioSession:
-    """Context manager that owns the PyAudio + stream lifecycle and yields VAD-filtered audio chunks.
+    """Context manager that owns the PyAudio + stream lifecycle and yields audio chunks.
 
     Usage:
         with AudioSession(threshold=200.0) as session:
@@ -61,21 +62,30 @@ class AudioSession:
             for chunk in session:
                 ...
 
-    Iteration ends when (a) silence persists for ``silence_duration`` seconds after
-    speech has been detected, (b) ``max_duration`` is reached, or (c) ``stop_event``
-    is set. Setting ``threshold=0`` disables VAD and streams continuously.
+    Every chunk is yielded from the moment the stream opens — the threshold
+    does NOT gate what is sent (the server-side VAD filter strips leading
+    silence far more accurately than an RMS threshold can, and gating is how
+    utterance beginnings get clipped). The threshold's only job is deciding
+    when the utterance is over: iteration ends when (a) silence persists for
+    ``silence_duration`` seconds after speech has been detected, (b)
+    ``max_duration`` is reached, or (c) ``stop_event`` is set. Setting
+    ``threshold=0`` disables the silence auto-stop entirely.
     """
 
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     SAMPLE_RATE = 16000
 
+    # A stream-open can race PipeWire device hotplug; one re-enumeration
+    # retry absorbs nearly all transient failures without meaningful delay.
+    OPEN_ATTEMPTS = 2
+    OPEN_RETRY_DELAY_S = 0.2
+
     def __init__(
         self,
         threshold: float,
         silence_duration: float | None = None,
         max_duration: float | None = None,
-        pre_speech_padding: float | None = None,
         chunk_size_ms: int = 30,
         stop_event: threading.Event | None = None,
         debug: bool = False,
@@ -92,11 +102,7 @@ class AudioSession:
             if max_duration is not None
             else config.get("max_recording_duration", CODE_DEFAULTS["max_recording_duration"])
         )
-        self.pre_speech_padding = (
-            pre_speech_padding
-            if pre_speech_padding is not None
-            else config.get("pre_speech_padding", CODE_DEFAULTS["pre_speech_padding"])
-        )
+        self.input_device_name: str | None = config.get("input_device_name") or None
         self.chunk_size_ms = chunk_size_ms
         self.stop_event = stop_event
         self.debug = debug
@@ -107,26 +113,38 @@ class AudioSession:
         self._stream: pyaudio.Stream | None = None
 
     def __enter__(self) -> "AudioSession":
-        mic_index = find_microphone()
-        if mic_index is None:
-            raise AudioSessionError("No microphone found")
-
-        with _suppress_native_stderr():
-            self._p = pyaudio.PyAudio()
-            try:
-                self._stream = self._p.open(
-                    format=self.FORMAT,
-                    channels=self.CHANNELS,
-                    rate=self.SAMPLE_RATE,
-                    input=True,
-                    input_device_index=mic_index,
-                    frames_per_buffer=self._chunk_samples,
-                )
-            except Exception as e:
-                self._p.terminate()
-                self._p = None
-                raise AudioSessionError(f"Failed to open audio stream: {e}") from e
-        return self
+        last_error: Exception | None = None
+        for attempt in range(self.OPEN_ATTEMPTS):
+            if attempt > 0:
+                time.sleep(self.OPEN_RETRY_DELAY_S)
+            with _suppress_native_stderr():
+                # A fresh PyAudio instance per attempt: PortAudio snapshots
+                # the device topology at instantiation, so the device index
+                # is resolved and opened against the same snapshot.
+                p = pyaudio.PyAudio()
+                mic_index = find_microphone(p, preferred_name=self.input_device_name)
+                if mic_index is None:
+                    p.terminate()
+                    raise AudioSessionError("No microphone found")
+                try:
+                    self._stream = p.open(
+                        format=self.FORMAT,
+                        channels=self.CHANNELS,
+                        rate=self.SAMPLE_RATE,
+                        input=True,
+                        input_device_index=mic_index,
+                        frames_per_buffer=self._chunk_samples,
+                    )
+                    self._p = p
+                    return self
+                except Exception as e:
+                    p.terminate()
+                    last_error = e
+            logger.warning(
+                f"Audio stream open failed (attempt {attempt + 1}/{self.OPEN_ATTEMPTS}): "
+                f"{last_error}"
+            )
+        raise AudioSessionError(f"Failed to open audio stream: {last_error}") from last_error
 
     def __exit__(
         self,
@@ -156,19 +174,12 @@ class AudioSession:
             if self.max_duration is None
             else int(self.max_duration * self.SAMPLE_RATE / self._chunk_samples)
         )
-        num_pre_padding_chunks = int(
-            self.pre_speech_padding * self.SAMPLE_RATE / self._chunk_samples
-        )
 
-        pre_speech_buffer: collections.deque[bytes] = collections.deque(
-            maxlen=num_pre_padding_chunks
-        )
         smoothing_window: int = 3
         volume_history: collections.deque[float] = collections.deque(maxlen=smoothing_window)
 
-        is_speaking = False
-        silent_chunks = 0
         speech_started = False
+        silent_chunks = 0
         total_chunks = 0
 
         if no_vad_mode:
@@ -177,8 +188,8 @@ class AudioSession:
             )
         else:
             logger.info(
-                f"Listening with threshold {self.threshold:.1f}, "
-                f"silence duration {self.silence_duration:.1f}s..."
+                f"Recording (threshold {self.threshold:.1f}, stops after "
+                f"{self.silence_duration:.1f}s of post-speech silence)..."
             )
 
         while total_chunks < max_total_chunks:
@@ -196,13 +207,20 @@ class AudioSession:
                 logger.error(f"Error reading audio: {e}")
                 return
 
+            # Every chunk is streamed; the volume tracking below only decides
+            # when to stop.
+            yield data
+
+            if no_vad_mode:
+                continue
+
             audio_np = np.frombuffer(data, dtype=np.int16)
             if audio_np.size == 0:
                 continue
 
             volume = float(np.sqrt(np.mean(audio_np.astype(np.float32) ** 2)))
             volume_history.append(volume)
-            smoothed = float(np.mean(volume_history)) if volume_history else volume
+            smoothed = float(np.mean(volume_history))
 
             if self.debug and total_chunks % max(1, int(1000 / self.chunk_size_ms) // 2) == 0:
                 silent_time = silent_chunks * self.chunk_size_ms / 1000.0
@@ -211,33 +229,20 @@ class AudioSession:
                     f"Chunk {total_chunks}: Vol: {volume:.1f} Smooth: {smoothed:.1f} "
                     f"(Thr: {self.threshold:.1f}) "
                     f"Silent: {silent_time:.1f}s/{max_silent_time:.1f}s "
-                    f"Speaking: {is_speaking}"
+                    f"Speech started: {speech_started}"
                 )
 
-            if no_vad_mode:
-                yield data
-                continue
-
             if smoothed > self.threshold:
-                if not is_speaking:
-                    if self.debug:
-                        logger.debug(f"Speech detected. Volume: {volume:.1f}")
-                    is_speaking = True
-                    yield from list(pre_speech_buffer)
-                    pre_speech_buffer.clear()
-                    speech_started = True
-                yield data
+                if not speech_started and self.debug:
+                    logger.debug(f"Speech detected. Volume: {volume:.1f}")
+                speech_started = True
                 silent_chunks = 0
-            else:
-                if is_speaking:
-                    yield data
-                    silent_chunks += 1
-                    if silent_chunks > max_silent_chunks:
-                        if self.debug:
-                            logger.debug("Silence duration exceeded, stopping stream.")
-                        return
-                elif not speech_started:
-                    pre_speech_buffer.append(data)
+            elif speech_started:
+                silent_chunks += 1
+                if silent_chunks > max_silent_chunks:
+                    if self.debug:
+                        logger.debug("Silence duration exceeded, stopping stream.")
+                    return
 
         if self.debug:
             logger.debug(f"Streaming loop finished. Processed {total_chunks} chunks.")
@@ -247,10 +252,10 @@ def calibrate_microphone(duration: int = 10) -> float:
     """Calibrates the microphone to determine an appropriate silence threshold using background noise analysis."""
 
     config = load_app_config()
-    CHUNK = config.get("audio_chunk_size", 1024)
-    FORMAT = pyaudio.paInt16
-    CHANNELS = config.get("audio_channels", 1)
-    RATE = config.get("audio_sample_rate", 16000)
+    CHUNK = 1024
+    FORMAT = AudioSession.FORMAT
+    CHANNELS = AudioSession.CHANNELS
+    RATE = AudioSession.SAMPLE_RATE
 
     with contextlib.suppress(FileNotFoundError):
         safe_subprocess_run(
@@ -270,15 +275,21 @@ def calibrate_microphone(duration: int = 10) -> float:
     logger.info("Measuring ambient noise levels...")
     logger.info("-" * 60)
 
-    mic_index: int | None = find_microphone()
-    if mic_index is None:
-        logger.warning("No microphone found during calibration, using default threshold.")
-        return float(
-            config.get("silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"])
-        )
-
     with _suppress_native_stderr():
         p = pyaudio.PyAudio()
+        # Same-instance resolve + open — see find_microphone for the race
+        # this avoids.
+        mic_index: int | None = find_microphone(
+            p, preferred_name=config.get("input_device_name") or None
+        )
+        if mic_index is None:
+            logger.warning("No microphone found during calibration, using default threshold.")
+            p.terminate()
+            return float(
+                config.get(
+                    "silence_threshold_fallback", CODE_DEFAULTS["silence_threshold_fallback"]
+                )
+            )
 
         try:
             stream = p.open(

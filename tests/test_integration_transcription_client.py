@@ -79,7 +79,7 @@ def patched_audio(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[_FakePyAudio
     from talkat import record as record_mod
 
     monkeypatch.setattr(record_mod.pyaudio, "PyAudio", _FakePyAudio)
-    monkeypatch.setattr(record_mod, "find_microphone", lambda: 0)
+    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: 0)
     # Feed a short loud burst then silence — enough to satisfy VAD and end.
     _FakePyAudio._next_chunks = [_loud_chunk()] * 3 + [_silent_chunk()] * 30  # type: ignore[attr-defined]
     yield _FakePyAudio

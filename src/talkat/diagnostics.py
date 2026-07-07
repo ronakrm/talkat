@@ -26,6 +26,11 @@ from .paths import DIAGNOSTICS_DIR
 
 logger = get_logger(__name__)
 
+# Retention cap for timestamped records. Every dictation writes one, so an
+# active user produces dozens a day — without pruning the directory grows
+# forever. 200 records ≈ several days of heavy use, plenty for trending.
+MAX_TIMESTAMPED_RECORDS = 200
+
 
 def _safe_rtf(audio_duration: float, asr_seconds: float) -> float | None:
     """Realtime factor = wall-clock ASR time ÷ audio duration; None if undefined."""
@@ -93,4 +98,20 @@ def write_record(record: dict[str, Any]) -> Path | None:
         logger.warning(f"Could not write diagnostics: {e}")
         return None
 
+    _prune_old_records()
     return timestamped
+
+
+def _prune_old_records() -> None:
+    """Delete the oldest timestamped records beyond the retention cap.
+
+    Filename timestamps sort chronologically, so a name sort is an age sort.
+    Best-effort like everything else here.
+    """
+    try:
+        records = sorted(DIAGNOSTICS_DIR.glob("diagnostics_*.json"))
+        excess = len(records) - MAX_TIMESTAMPED_RECORDS
+        for stale in records[:excess] if excess > 0 else []:
+            stale.unlink(missing_ok=True)
+    except OSError as e:
+        logger.debug(f"Diagnostics pruning skipped: {e}")

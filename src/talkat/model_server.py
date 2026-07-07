@@ -1,3 +1,4 @@
+import importlib.metadata
 import json
 import os
 import sys
@@ -321,6 +322,13 @@ def transcribe_file() -> ResponseReturnValue:
         return jsonify({"error": error_msg}), 500
 
 
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("talkat")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
 @app.route("/health", methods=["GET"])
 def health_check() -> ResponseReturnValue:
     if _service.backend is not None:
@@ -330,6 +338,7 @@ def health_check() -> ResponseReturnValue:
                 "status": "ok",
                 "model_type": _service.model_type,
                 "model_name": config.get("model_name"),
+                "version": _package_version(),
                 "message": "Model loaded",
             }
         ), 200

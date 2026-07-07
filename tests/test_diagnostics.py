@@ -153,3 +153,35 @@ def test_record_round_trips_through_json(mode: str, extra: dict | None):
         assert back["extra"] == extra
     else:
         assert "extra" not in back
+
+
+def test_write_record_prunes_old_timestamped_files(tmp_path, monkeypatch):
+    """Timestamped records beyond the retention cap are deleted, oldest first."""
+    from talkat import diagnostics as diag
+
+    monkeypatch.setattr(diag, "DIAGNOSTICS_DIR", tmp_path)
+    monkeypatch.setattr(diag, "MAX_TIMESTAMPED_RECORDS", 5)
+
+    # Seed 7 pre-existing records with clearly-older timestamps.
+    for i in range(7):
+        (tmp_path / f"diagnostics_2020010{i}_000000.json").write_text("{}")
+
+    record = build_record(
+        mode="listen",
+        audio_duration=1.0,
+        asr_seconds=0.1,
+        applied_gain_db=0.0,
+        model_type="faster-whisper",
+        model_name="small.en",
+        transcript_chars=2,
+        transcript_words=1,
+    )
+    newest = diag.write_record(record)
+    assert newest is not None
+
+    remaining = sorted(tmp_path.glob("diagnostics_*.json"))
+    assert len(remaining) == 5
+    # The newest (just written) record must have survived the prune.
+    assert newest in remaining
+    # The oldest seeds are the ones that went.
+    assert not (tmp_path / "diagnostics_20200100_000000.json").exists()

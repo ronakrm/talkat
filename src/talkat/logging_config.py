@@ -73,6 +73,8 @@ def setup_logging(
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    # httpx logs every request at INFO — noise in dictation logs and doctor output.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     # Suppress ALSA warnings specifically
     logging.getLogger("pyaudio").setLevel(logging.ERROR)

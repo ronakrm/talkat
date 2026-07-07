@@ -4,11 +4,10 @@ import contextlib
 import json
 import os
 import signal
-import subprocess
 import threading
 import time
 import traceback
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import datetime
 from pathlib import Path
 from types import FrameType, TracebackType
@@ -19,6 +18,7 @@ import httpx
 from .clipboard import copy_to_clipboard
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
 from .diagnostics import build_record, write_record
+from .focus import get_focused_window
 from .logging_config import get_logger
 from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager
@@ -58,9 +58,11 @@ def save_transcript(text: str, mode: str = "short") -> Path:
 
 
 def _notify(message: str) -> None:
-    """Send a desktop notification, ignoring failure (notify-send may be missing)."""
-    with contextlib.suppress(FileNotFoundError):
+    """Send a desktop notification; a notification failure must never break dictation."""
+    try:
         safe_subprocess_run(["notify-send", "Talkat", message], check=False)
+    except Exception as e:
+        logger.debug(f"Notification failed: {e}")
 
 
 def _log_threshold_source(threshold: float) -> None:
@@ -120,9 +122,15 @@ class TranscriptionClient:
         stop_event: threading.Event | None = None,
         max_duration: float | None = None,
         debug: bool = False,
+        on_recording_started: Callable[[], None] | None = None,
     ) -> str:
         """
         Record one utterance and return its transcription.
+
+        ``on_recording_started`` fires once the microphone stream is actually
+        open — the earliest moment speech is being captured. "Start speaking"
+        cues belong there; firing them earlier (before device setup, which
+        takes hundreds of ms) is how utterance beginnings get lost.
 
         Returns the transcribed text (possibly empty if no speech detected).
         Raises ``AudioSessionError`` on microphone failure, ``TranscriptionUnreachable``
@@ -136,6 +144,8 @@ class TranscriptionClient:
             stop_event=stop_event,
             debug=debug,
         ) as session:
+            if on_recording_started is not None:
+                on_recording_started()
             metadata: dict[str, Any] = {"rate": session.sample_rate}
             if self.language:
                 metadata["language"] = self.language
@@ -264,9 +274,15 @@ def listen_once(
         float(config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"]))
     )
 
-    _notify('Recording... Run "talkat listen" again to stop')
-    logger.info("Speech detected. Streaming audio to model server...")
-    logger.info("(Run 'talkat listen' again to stop recording)")
+    # The focus guard compares against the window focused at invocation time —
+    # that's the window the user intends to dictate into.
+    focus_before: str | None = None
+    if config.get("focus_guard", CODE_DEFAULTS["focus_guard"]):
+        focus_before = get_focused_window()
+
+    def _announce_recording() -> None:
+        logger.info("Recording — speak now. (Run 'talkat listen' again to stop.)")
+        _notify('Recording... Run "talkat listen" again to stop')
 
     server_metadata: dict[str, float] = {
         "audio_duration": 0.0,
@@ -275,7 +291,11 @@ def listen_once(
     }
     try:
         with TranscriptionClient(config) as client:
-            text = client.transcribe_one_utterance(stop_event=stop_event, debug=True)
+            text = client.transcribe_one_utterance(
+                stop_event=stop_event,
+                debug=True,
+                on_recording_started=_announce_recording,
+            )
             # ``last_metadata`` is set by the real client after each call;
             # test stubs may not have it. Default to zeros so diagnostics
             # still write a valid record.
@@ -326,21 +346,7 @@ def listen_once(
         logger.info(f"Transcription saved to: {output_path}")
         _notify(f"Saved to: {output_path.name}")
     else:
-        try:
-            safe_text = sanitize_text_for_typing(text)
-            # timeout=None: typing a long transcript with --key-delay=1 can take
-            # well over the default 30s.
-            safe_subprocess_run(
-                ["ydotool", "type", "--key-delay=1", safe_text],
-                check=True,
-                timeout=None,
-            )
-            logger.info(f"Typed: {text}")
-            _notify(f"Typed: {text[:100]}")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            logger.warning("ydotool not available, printing text instead:")
-            print(f"TEXT: {text}")
-            _notify(f"Recognized: {text[:100]}")
+        _deliver_text(text, config, focus_before)
 
     _write_diagnostics_for_listen(
         config=config,
@@ -352,6 +358,62 @@ def listen_once(
 
     pm.cleanup_pid_file()
     return 0
+
+
+def _deliver_text(text: str, config: dict[str, Any], focus_before: str | None) -> None:
+    """Deliver the transcript: type it into the focused window, else clipboard.
+
+    The invariant this function maintains: the transcript is never silently
+    lost. Every failure path lands it in the clipboard or, failing that, on
+    stdout — with a notification saying where it went.
+    """
+    if config.get("output_mode", CODE_DEFAULTS["output_mode"]) == "clipboard":
+        if copy_to_clipboard(text):
+            logger.info(f"Copied to clipboard: {text}")
+            _notify(f"Copied: {text[:100]}")
+        else:
+            logger.warning("Clipboard unavailable (wl-copy/xclip missing), printing instead:")
+            print(f"TEXT: {text}")
+            _notify(f"Recognized: {text[:100]}")
+        return
+
+    # Focus guard: if the user switched windows while dictating, typing would
+    # splatter the transcript into the wrong app. Both sides must be known to
+    # conclude "changed" — an IPC failure disables the guard, not typing.
+    if focus_before is not None:
+        focus_now = get_focused_window()
+        if focus_now is not None and focus_now != focus_before:
+            logger.warning(
+                f"Focused window changed during dictation ({focus_before} -> {focus_now}); "
+                "not typing into it."
+            )
+            if copy_to_clipboard(text):
+                _notify("Focus changed — transcript copied to clipboard.")
+            else:
+                print(f"TEXT: {text}")
+                _notify("Focus changed — transcript printed to console.")
+            return
+
+    try:
+        safe_text = sanitize_text_for_typing(text)
+        # timeout=None: typing a long transcript with --key-delay=1 can take
+        # well over the default 30s.
+        safe_subprocess_run(
+            ["ydotool", "type", "--key-delay=1", safe_text],
+            check=True,
+            timeout=None,
+        )
+        logger.info(f"Typed: {text}")
+        _notify(f"Typed: {text[:100]}")
+    except Exception as e:
+        # Typing fails in many ways — ydotool missing, ydotoold not running,
+        # a crash mid-type. The transcript must survive all of them.
+        logger.warning(f"Typing failed ({e}); falling back to clipboard.")
+        if copy_to_clipboard(text):
+            _notify("Typing failed — transcript copied to clipboard.")
+        else:
+            print(f"TEXT: {text}")
+            _notify(f"Recognized: {text[:100]}")
 
 
 def _write_diagnostics_for_listen(

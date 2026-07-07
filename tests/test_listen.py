@@ -67,8 +67,11 @@ class _StubTranscriber:
         stop_event: threading.Event | None = None,
         max_duration: float | None = None,
         debug: bool = False,
+        on_recording_started: object | None = None,
     ) -> str:
         self.calls += 1
+        if callable(on_recording_started):
+            on_recording_started()
         if self.raises is not None:
             raise self.raises
         return self.text
@@ -94,6 +97,9 @@ def listen_env(monkeypatch: pytest.MonkeyPatch, restore_signal_handlers) -> Iter
     monkeypatch.setattr(main_mod, "safe_subprocess_run", fake_run)
     monkeypatch.setattr(main_mod, "_notify", lambda _msg: None)
     monkeypatch.setattr(main_mod, "_set_stop_event_on_signal", lambda _ev: None)
+    # Focus queries must never hit the real compositor from tests (the test
+    # process may well be running inside one). None disables the guard.
+    monkeypatch.setattr(main_mod, "get_focused_window", lambda: None)
 
     state: dict = {"subprocess_calls": subprocess_calls, "main_mod": main_mod}
     yield state
@@ -210,6 +216,124 @@ def test_listen_once_sanitizes_text_before_typing(clean_pid_files, listen_env):
     # "hi" and "there" should still be present.
     assert "hi" in typed_arg
     assert "there" in typed_arg
+
+
+def test_listen_once_types_text_with_shell_metacharacters(clean_pid_files, listen_env, monkeypatch):
+    """Transcripts containing $ ( ) ; etc. must be typed verbatim.
+
+    Regression test: validate_command used to reject shell metacharacters in
+    *arguments*, so dictating "$20 (roughly)" crashed the typing path and
+    lost the text. With shell=False these characters are inert data. The REAL
+    safe_subprocess_run validation runs here; only the spawn is stubbed.
+    """
+    import subprocess as subprocess_module
+
+    from talkat.main import listen_once
+    from talkat.security import safe_subprocess_run as real_safe_run
+
+    spawned: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(listen_env["main_mod"], "safe_subprocess_run", real_safe_run)
+    monkeypatch.setattr(
+        subprocess_module, "run", lambda command, **kwargs: spawned.append(list(command)) or _Done()
+    )
+
+    _install_stub_transcriber(listen_env["main_mod"], text="$20 (roughly); done & dusted")
+    rc = listen_once()
+
+    assert rc == 0
+    ydotool_calls = [c for c in spawned if c and c[0] == "ydotool"]
+    assert len(ydotool_calls) == 1
+    assert ydotool_calls[0][3] == "$20 (roughly); done & dusted"
+
+
+def test_listen_once_focus_change_diverts_to_clipboard(clean_pid_files, listen_env, monkeypatch):
+    """If the focused window changed during dictation, don't type — clipboard it."""
+    from talkat.main import listen_once
+
+    main_mod = listen_env["main_mod"]
+    _install_stub_transcriber(main_mod, text="wrong window")
+
+    focus_values = iter(["niri:1", "niri:2"])  # capture-time, then check-time
+    monkeypatch.setattr(main_mod, "get_focused_window", lambda: next(focus_values))
+
+    copied: list[str] = []
+    monkeypatch.setattr(main_mod, "copy_to_clipboard", lambda text: copied.append(text) or True)
+
+    rc = listen_once()
+
+    assert rc == 0
+    ydotool_calls = [c for c in listen_env["subprocess_calls"] if c and c[0] == "ydotool"]
+    assert ydotool_calls == [], "typed despite focus change"
+    assert copied == ["wrong window"]
+
+
+def test_listen_once_stable_focus_still_types(clean_pid_files, listen_env, monkeypatch):
+    """Unchanged focus must not divert anything — the normal typing path runs."""
+    from talkat.main import listen_once
+
+    main_mod = listen_env["main_mod"]
+    _install_stub_transcriber(main_mod, text="right window")
+    monkeypatch.setattr(main_mod, "get_focused_window", lambda: "niri:7")
+
+    rc = listen_once()
+
+    assert rc == 0
+    ydotool_calls = [c for c in listen_env["subprocess_calls"] if c and c[0] == "ydotool"]
+    assert len(ydotool_calls) == 1
+    assert ydotool_calls[0][3] == "right window"
+
+
+def test_listen_once_typing_failure_falls_back_to_clipboard(
+    clean_pid_files, listen_env, monkeypatch
+):
+    """A ydotool failure must never lose the transcript — clipboard fallback."""
+    from talkat.main import listen_once
+
+    main_mod = listen_env["main_mod"]
+    _install_stub_transcriber(main_mod, text="precious words")
+
+    def failing_run(command: list[str], **kwargs: object) -> object:
+        if command and command[0] == "ydotool":
+            raise FileNotFoundError("ydotool not installed")
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(main_mod, "safe_subprocess_run", failing_run)
+
+    copied: list[str] = []
+    monkeypatch.setattr(main_mod, "copy_to_clipboard", lambda text: copied.append(text) or True)
+
+    rc = listen_once()
+
+    assert rc == 0
+    assert copied == ["precious words"]
+
+
+def test_listen_once_output_mode_clipboard_never_types(clean_pid_files, listen_env, monkeypatch):
+    """output_mode=clipboard sends the transcript to the clipboard, not ydotool."""
+    from talkat.main import listen_once
+
+    main_mod = listen_env["main_mod"]
+    _install_stub_transcriber(main_mod, text="clipboard me")
+
+    copied: list[str] = []
+    monkeypatch.setattr(main_mod, "copy_to_clipboard", lambda text: copied.append(text) or True)
+
+    rc = listen_once(config_overrides={"output_mode": "clipboard"})
+
+    assert rc == 0
+    ydotool_calls = [c for c in listen_env["subprocess_calls"] if c and c[0] == "ydotool"]
+    assert ydotool_calls == []
+    assert copied == ["clipboard me"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,22 +1,18 @@
 [Unit]
 Description=Talkat Voice Dictation Server
-Documentation=https://github.com/yourusername/talkat
-After=pulseaudio.service pipewire.service
-Wants=pulseaudio.service
+Documentation=https://github.com/ronakrm/talkat
+After=sound.target
 
 [Service]
 Type=simple
-ExecStart=%i/bin/talkat server
+ExecStart=/usr/bin/talkat server
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-Environment=HOME=%h
-Environment=XDG_CONFIG_HOME=%h/.config
-Environment=XDG_CACHE_HOME=%h/.cache
-Environment=XDG_DATA_HOME=%h/.local/share
 
-# Security hardening — defence-in-depth for a per-user service.
+# Security hardening — defence-in-depth for a per-user service. Kept in sync
+# with the unit `talkat install-service` writes (src/talkat/service.py).
 # ReadWritePaths punches holes through ProtectHome=read-only for the
 # talkat-owned XDG directories. XDG_RUNTIME_DIR (/run/user/$UID) is
 # outside $HOME so it stays writable without an explicit entry.
@@ -33,7 +29,9 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
-PrivateDevices=no  # Need access to audio devices
+# PrivateDevices stays off — /dev/snd access matters if a future server-side
+# capture path lands; today only the client touches the mic.
+PrivateDevices=no
 
 [Install]
 WantedBy=default.target

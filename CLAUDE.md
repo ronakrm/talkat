@@ -435,9 +435,15 @@ Resolved former known-bugs (kept here so they aren't re-reported):
 - ~~Transcript lost when typing fails~~ → clipboard/stdout fallback chain
 
 Still true / watch out for:
-1. **Signal handling is subtle** — the SIGINT handler sets the stop event
-   AND raises `KeyboardInterrupt` to unblock httpx (PEP 475). It works;
-   change it only with real-hardware toggle testing.
+1. **Signal handling is subtle** — the FIRST SIGINT/SIGTERM only sets the
+   stop event: the capture loop notices within one ~32 ms chunk, the
+   streaming request completes, and the transcript is delivered. A SECOND
+   signal raises `KeyboardInterrupt` to force-abort a blocked wait (hung
+   server — PEP 475 would otherwise swallow the signal until
+   `http_timeout`). Raising on the *first* signal was the v1.0.0 bug that
+   made every toggle-stop log "Recording interrupted." and lose the
+   transcript. `tests/test_toggle_signal.py` pins this with real signals;
+   still re-test toggle on real hardware when touching it.
 2. **Long mode reopens the mic between utterances** — speech during that
    ~0.3 s gap is lost (tracked in Future Improvements).
 3. **ALSA/JACK init noise** is fd-level suppressed

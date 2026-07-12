@@ -205,24 +205,34 @@ def _fetch_server_info(socket_path: str) -> tuple[str | None, str | None]:
 
 def _set_stop_event_on_signal(stop_event: threading.Event) -> None:
     """
-    Install signal handlers that set an Event and interrupt blocking I/O.
+    Install signal handlers for a graceful-then-forceful stop.
+
+    **First signal** (the toggle's SIGINT): set ``stop_event`` and return.
+    The capture loop polls the event between ~32 ms chunks, so the audio
+    stream ends cleanly, the in-flight ``/transcribe_stream`` request
+    completes, and the transcript is delivered. Raising here instead would
+    tear down the streaming POST mid-request and lose the recording — that
+    was the v1.0.0 toggle regression: every hotkey stop logged "Recording
+    interrupted." and typed nothing.
+
+    **Second signal** (stop pressed again, or ``stop_process`` escalating to
+    SIGTERM after ``process_stop_timeout``): raise ``KeyboardInterrupt`` to
+    abort whatever the main thread is blocked on. This is the escape hatch
+    the raise exists for — PEP 475 auto-retries EINTR'd syscalls, so without
+    it a signal arriving while blocked on a hung server is silently
+    swallowed until ``http_timeout``. Raising from the handler propagates
+    via Python's standard exception path, async-signal-safe in the same way
+    the interpreter's built-in SIGINT handler is.
 
     The handler does NO logging or cleanup — Python's logging module isn't
     async-signal-safe and can deadlock if invoked from a handler. The main
     loop observes the event and runs logging/cleanup itself.
-
-    The handler also **raises ``KeyboardInterrupt``** at the end. Without
-    this, PEP 475's auto-retry of EINTR'd syscalls means a SIGINT arriving
-    during a blocking ``httpx.post`` (transcribe call) is silently swallowed
-    and we wait for the full ``http_timeout`` (default 120 s) before noticing
-    the user asked us to stop. Raising from the handler propagates out via
-    Python's standard exception path — async-signal-safe in the same way the
-    interpreter's built-in SIGINT handler is. Callers catch and exit cleanly.
     """
 
     def handler(signum: int, frame: FrameType | None) -> None:
+        if stop_event.is_set():
+            raise KeyboardInterrupt()
         stop_event.set()
-        raise KeyboardInterrupt()
 
     signal.signal(signal.SIGINT, handler)
     with contextlib.suppress(ValueError):

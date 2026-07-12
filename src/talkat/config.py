@@ -53,7 +53,13 @@ CODE_DEFAULTS: dict[str, Any] = {
     # position-embedding edge cases — segmenting bounds peak cost per pass.
     "max_segment_seconds": 480.0,  # 8 minutes — well under any single-pass cliff
     # Process Management Timeouts
-    "process_stop_timeout": 5.0,  # Max time to wait for process to stop
+    # The stop wait must cover the work a listen process legitimately does
+    # AFTER the stop signal: finish the stream, wait for ASR (~a quarter of
+    # the audio length), type the text. The poll returns the moment the
+    # process exits, so the common case doesn't feel this ceiling — but
+    # hitting it escalates to SIGTERM, which force-aborts and drops the
+    # transcript.
+    "process_stop_timeout": 20.0,
     "lock_acquire_timeout": 1.0,  # Max time to wait for lock acquisition
     "lock_retry_interval": 0.01,  # Sleep interval between lock acquisition attempts
     "process_check_interval": 0.1,  # Sleep interval when checking process status

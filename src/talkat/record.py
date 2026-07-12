@@ -194,6 +194,7 @@ class AudioSession:
 
         while total_chunks < max_total_chunks:
             if self.stop_event is not None and self.stop_event.is_set():
+                logger.info("Stop requested — finishing this recording...")
                 return
 
             try:

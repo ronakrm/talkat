@@ -100,6 +100,10 @@ def listen_env(monkeypatch: pytest.MonkeyPatch, restore_signal_handlers) -> Iter
     # Focus queries must never hit the real compositor from tests (the test
     # process may well be running inside one). None disables the guard.
     monkeypatch.setattr(main_mod, "get_focused_window", lambda: None)
+    # _install_stub_transcriber swaps the client in by plain assignment;
+    # registering the real class here makes monkeypatch restore it on
+    # teardown (otherwise the stub leaks into later test files).
+    monkeypatch.setattr(main_mod, "TranscriptionClient", main_mod.TranscriptionClient)
 
     state: dict = {"subprocess_calls": subprocess_calls, "main_mod": main_mod}
     yield state

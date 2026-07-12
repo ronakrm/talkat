@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-12
+
+Hotfix: toggle-stop was losing the transcript — present since v1.0.0, but
+masked on the dev machine by the stale-install shadowing that 1.1.0's
+`talkat doctor` was built to catch.
+
+### Fixed
+- **Toggle-stop lost the transcript.** The signal handler raised
+  `KeyboardInterrupt` on the *first* SIGINT, tearing down the in-flight
+  streaming transcription ("Recording interrupted.") before the graceful
+  stop-event path could finish it. Now the first signal ends the capture
+  loop cleanly (within one ~32 ms chunk), the request completes, and the
+  text is delivered; a second signal — pressing stop again, or
+  `stop_process`'s SIGTERM escalation — force-aborts a blocked wait (the
+  hung-server escape hatch the raise was originally added for).
+  Regression-tested with real signals against a real UDS server
+  (`tests/test_toggle_signal.py`).
+- `process_stop_timeout` default raised 5 s → 20 s: after the stop signal a
+  listen process legitimately spends time on ASR (~¼ of the audio length)
+  plus typing, and hitting the old ceiling escalated to SIGTERM — which now
+  means force-abort. The stop poll still returns the instant the process
+  exits.
+- Test hygiene: `test_listen.py` replaced `talkat.main.TranscriptionClient`
+  with a stub and never restored it, poisoning any later test file that
+  needed the real client.
+
 ## [1.1.0] - 2026-07-06
 
 Stability release: fixes the cut-off-utterance-beginnings class of bugs, the

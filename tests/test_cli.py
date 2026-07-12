@@ -312,8 +312,6 @@ def test_main_calibrate_dispatches_to_run_calibrate(monkeypatch: pytest.MonkeyPa
 def test_main_file_dispatches_to_process_audio_file_command(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    from talkat import cli as cli_mod
-
     captured: dict = {}
 
     def fake_handler(
@@ -332,7 +330,7 @@ def test_main_file_dispatches_to_process_audio_file_command(
         captured["postprocess"] = postprocess
         return 0
 
-    monkeypatch.setattr(cli_mod, "process_audio_file_command", fake_handler)
+    monkeypatch.setattr("talkat.file_processor.process_audio_file_command", fake_handler)
 
     src = tmp_path / "in.wav"
     src.write_bytes(b"\x00")
@@ -354,8 +352,6 @@ def test_main_file_dispatches_to_process_audio_file_command(
 
 
 def test_main_batch_dispatches_to_batch_process_files(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    from talkat import cli as cli_mod
-
     captured: dict = {}
 
     def fake_handler(
@@ -372,7 +368,7 @@ def test_main_batch_dispatches_to_batch_process_files(monkeypatch: pytest.Monkey
         captured["postprocess"] = postprocess
         return 0
 
-    monkeypatch.setattr(cli_mod, "batch_process_files", fake_handler)
+    monkeypatch.setattr("talkat.file_processor.batch_process_files", fake_handler)
 
     a = tmp_path / "a.wav"
     b = tmp_path / "b.wav"
@@ -749,8 +745,6 @@ def test_main_long_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, c
 
 
 def test_main_file_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    from talkat import cli as cli_mod
-
     captured: dict = {}
 
     def fake_handler(
@@ -764,7 +758,7 @@ def test_main_file_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, t
         captured["postprocess"] = postprocess
         return 0
 
-    monkeypatch.setattr(cli_mod, "process_audio_file_command", fake_handler)
+    monkeypatch.setattr("talkat.file_processor.process_audio_file_command", fake_handler)
     src = tmp_path / "in.wav"
     src.write_bytes(b"\x00")
     monkeypatch.setattr(sys, "argv", ["talkat", "file", str(src), "--postprocess", "code"])
@@ -775,8 +769,6 @@ def test_main_file_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, t
 
 
 def test_main_batch_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    from talkat import cli as cli_mod
-
     captured: dict = {}
 
     def fake_handler(
@@ -789,7 +781,7 @@ def test_main_batch_passes_postprocess_through(monkeypatch: pytest.MonkeyPatch, 
         captured["postprocess"] = postprocess
         return 0
 
-    monkeypatch.setattr(cli_mod, "batch_process_files", fake_handler)
+    monkeypatch.setattr("talkat.file_processor.batch_process_files", fake_handler)
     a = tmp_path / "a.wav"
     a.write_bytes(b"\x00")
     monkeypatch.setattr(sys, "argv", ["talkat", "batch", str(a), "--postprocess", "email"])

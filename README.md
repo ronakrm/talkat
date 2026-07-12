@@ -46,6 +46,13 @@ installed.
 
 ### Path 1: Local install from a git checkout
 
+> **Already have the AUR package?** Don't run `setup.sh` on top of it — a
+> uv-tool install shadows the packaged one on PATH and in systemd, and the
+> shadowing copy silently goes stale. For hacking on a checkout use
+> `./dev.sh` instead (see [Development](#development-without-installing));
+> `talkat doctor` detects shadowed installs if you're unsure what you're
+> running.
+
 ```bash
 git clone https://github.com/ronakrm/talkat.git
 cd talkat
@@ -122,27 +129,34 @@ Log out + back in after changing groups.
 
 ### After install
 
-1. Verify the service is up: `systemctl --user status talkat`
-2. **Calibrate your microphone** (required for VAD to work):
+1. Run `talkat doctor` — it checks the service, socket, audio devices,
+   ydotool/clipboard tooling, and flags stale or shadowed installs.
+2. **Calibrate your microphone** (required for silence detection):
    `talkat calibrate` (stay silent for 10 seconds)
 3. Try `talkat listen` — focus a text editor and speak.
 
 ### Development without installing
 
-For iterating on the code without going through `setup.sh`:
+For iterating on the code without touching your installed talkat:
 
 ```bash
-uv sync                # set up the project venv
-uv run talkat server   # foreground model server (Ctrl+C to stop)
+uv sync           # set up the project venv
+./dev.sh server   # foreground model server on an isolated dev socket
 
 # in another terminal:
-uv run talkat calibrate
-uv run talkat listen
-uv run talkat long
+./dev.sh calibrate
+./dev.sh listen
+./dev.sh doctor   # environment report as the dev build sees it
 ```
 
-This bypasses the systemd unit entirely — useful when you're editing code
-and want fast feedback without restarting a service.
+`dev.sh` is `uv run talkat` plus a `TALKAT_RUNTIME_DIR` override that moves
+the unix socket, PID files, and locks to `$XDG_RUNTIME_DIR/talkat-dev/`. A
+dev server/client pair therefore never collides with the installed service —
+your desktop hotkeys keep dictating through the stable install while you
+test the checkout. Config, models, and transcripts are shared.
+
+To point a dev client at the *installed* server instead, run
+`uv run talkat listen` directly (no isolation).
 
 ## Usage
 
@@ -253,6 +267,33 @@ talkat file input.wav --language de   # transcribe a German audio file
 ```
 
 Use `"auto"` to have faster-whisper detect the language per utterance.
+
+### Output behavior & focus guard
+
+`talkat listen` types into the window that had focus when you started
+recording. If focus moved while you were dictating (alt-tab, a popup stole
+focus), talkat refuses to type into the wrong window and copies the
+transcript to the clipboard instead, with a notification. The guard uses
+the compositor's IPC and supports **niri, Hyprland, and sway**; on other
+compositors it silently disables itself (always types).
+
+- `focus_guard` (default `true`) — set `false` to always type regardless
+  of focus changes.
+- `output_mode` (default `"type"`) — set `"clipboard"` to never type and
+  always copy transcripts to the clipboard.
+- If typing fails for any reason (ydotoold not running, ydotool missing),
+  the transcript falls back to the clipboard rather than being lost.
+
+### Input device
+
+By default talkat records from the system default input device, resolved
+at the moment the stream opens (robust against PipeWire device hotplug).
+To pin a specific microphone, set `input_device_name` to a case-insensitive
+substring of its name (`pactl list sources short` shows names):
+
+```json
+{ "input_device_name": "headset" }
+```
 
 Notes:
 - Vosk ignores `language` — Vosk language is baked into the model file, so
@@ -389,12 +430,16 @@ server. CI runs these on every push against a freshly-installed Ollama
    - Streams audio to the server for transcription
    - Uses ydotool to simulate keyboard input with the transcribed text
 3. The server supports both Vosk and Faster-Whisper models
-4. Voice Activity Detection (VAD) automatically detects when you start and stop speaking
-   - Uses calibrated threshold to distinguish speech from background noise
-   - Pre-buffers audio to avoid cutting off the beginning of speech
-   - Detects silence periods to know when you've stopped talking
+4. Everything the microphone hears from the moment the stream opens is sent
+   to the server — beginnings are never clipped by client-side gating
+   - The calibrated threshold is only used to detect when you've *stopped*
+     talking (silence auto-stop)
+   - The server-side VAD filter strips leading silence before ASR
 
 ## Troubleshooting
+
+Start with `talkat doctor` — it checks install shadowing, service health,
+client/server version skew, audio devices, and desktop tooling in one shot.
 
 1. If ydotool isn't working:
    - Make sure `ydotoold` is running

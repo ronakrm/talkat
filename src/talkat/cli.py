@@ -5,7 +5,6 @@ import os
 import sys
 from typing import Any
 
-from .file_processor import batch_process_files, process_audio_file_command
 from .logging_config import get_logger, setup_logging
 from .paths import ensure_user_directories
 from .process_manager import LockTimeout, ProcessManager
@@ -310,6 +309,11 @@ def main() -> None:
 
     subparsers.add_parser("server", help="Start the model server")
     subparsers.add_parser("calibrate", help="Calibrate microphone threshold")
+    subparsers.add_parser(
+        "doctor",
+        help="Check the environment: install origin, PATH/unit shadowing, "
+        "server health, audio devices, desktop tools",
+    )
 
     subparsers.add_parser(
         "install-service",
@@ -455,6 +459,10 @@ def main() -> None:
         from .main import run_calibrate
 
         sys.exit(run_calibrate())
+    elif args.command == "doctor":
+        from .doctor import run_doctor
+
+        sys.exit(run_doctor())
     elif args.command == "install-service":
         from .service import install_service
 
@@ -466,6 +474,8 @@ def main() -> None:
     elif args.command == "model":
         sys.exit(_run_model_command(args))
     elif args.command == "file":
+        from .file_processor import process_audio_file_command
+
         sys.exit(
             process_audio_file_command(
                 args.input,
@@ -477,6 +487,8 @@ def main() -> None:
             )
         )
     elif args.command == "batch":
+        from .file_processor import batch_process_files
+
         sys.exit(
             batch_process_files(
                 args.files,

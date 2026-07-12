@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-06
+
+Stability release: fixes the cut-off-utterance-beginnings class of bugs, the
+PipeWire device-index race, and a transcript-loss bug on punctuation-heavy
+text; adds a focus guard, `talkat doctor`, and a clean dev-vs-installed
+separation story.
+
+### Added
+- **`talkat doctor`** — environment self-check: talkat version + install
+  origin, duplicate `talkat` binaries on PATH (shadowing), systemd unit
+  shadowing (user unit vs packaged unit), server health + client/server
+  version skew, socket, audio devices, ydotoold/clipboard/notification
+  tooling, focus-guard status, active config layers.
+- **Focus guard**: `talkat listen` captures the focused window (niri /
+  Hyprland / sway IPC) when recording starts and refuses to type if focus
+  changed by transcription end — the transcript goes to the clipboard with a
+  notification instead of splattering into the wrong window. Config
+  `focus_guard` (default `true`).
+- `output_mode` config: `"type"` (default) or `"clipboard"` (never type).
+- `input_device_name` config: pin the capture device by case-insensitive
+  name substring instead of using the system default.
+- **Dev isolation**: `TALKAT_RUNTIME_DIR` env override relocates the server
+  socket, PID files, and locks together; `./dev.sh` wraps `uv run talkat`
+  with a `talkat-dev/` runtime dir so a checkout under test can never
+  toggle, stop, or out-bind the installed daily-driver service.
+- `/health` now reports the server package version; the client and `doctor`
+  use it to flag stale servers after upgrades.
+- Long-form segmentation: audio longer than `max_segment_seconds` (default
+  8 min) is split at energy minima before ASR, bounding peak memory and
+  avoiding Whisper long-form position-embedding failures (the "500 errors
+  on long recordings" known bug). Applies to both backends.
+- Server-side RMS gain normalization for quiet microphones, config-gated via
+  `audio_normalize_gain` / `audio_target_rms_dbfs` / `audio_max_gain_db`.
+  Boost-only, capped, peak-protected; applied gain is reported per request.
+- Per-run diagnostics JSON at `~/.local/share/talkat/diagnostics/`
+  (`diagnostics.latest.json` + timestamped copies, capped at 200 records)
+  with duration, realtime factor, applied gain, model, and errors.
+
+### Changed
+- **Audio streams from the moment the mic opens.** The calibrated threshold
+  no longer gates what is *sent* — it only decides when the utterance is
+  over. Combined with the server-side VAD filter this eliminates clipped
+  utterance beginnings. The now-obsolete `pre_speech_padding` config key is
+  ignored (dropped from saved configs automatically).
+- The "Recording…" notification fires only once the microphone stream is
+  actually open — it is now safe to start speaking as soon as the toast
+  appears. Previously it fired ~0.5 s early, during device setup.
+- Microphone resolution and stream-open now happen on a single PyAudio
+  instance (PortAudio topology snapshot), with one retry on a fresh
+  instance — fixes `[Errno -9998] Invalid number of channels` caused by
+  PipeWire device-index churn between enumeration and open.
+- `save_app_config` persists only values that differ from the code defaults
+  and drops keys unknown to the current version. Previously `talkat
+  calibrate` froze every default into `config.json`, permanently opting the
+  user out of future default improvements.
+- `talkat listen` no longer imports the file-processing stack at startup
+  (snappier hotkey response); device listing moved to DEBUG; httpx request
+  logging silenced.
+- `setup.sh` warns (and asks) before shadowing a system-packaged install,
+  and points to `./dev.sh` for development.
+- Repo `talkat.service` (installed by the Arch package) repaired: broken
+  `%i` ExecStart → `/usr/bin/talkat server`, placeholder documentation URL
+  fixed, hardening synced with the `install-service` unit.
+- `calibrate_microphone` uses the same fixed 16 kHz/mono parameters as
+  recording (the undocumented `audio_chunk_size`/`audio_channels`/
+  `audio_sample_rate` config reads are gone).
+
+### Fixed
+- **Transcript loss on punctuation**: `validate_command` rejected any argv
+  element containing `$ ( ) { } < > | & ;` — including the transcript being
+  passed to `ydotool type` / `notify-send`. Dictating "$20" or "(roughly)"
+  crashed the typing path uncaught. Arguments are inert data under
+  `shell=False`; only the executable name is checked now.
+- **Typing failures no longer lose the transcript**: any failure in the
+  typing path (ydotoold not running, ydotool missing, crash mid-type,
+  focus-guard divert) falls back to the clipboard, then stdout — with a
+  notification saying where the text went.
+- `notify-send` failures can no longer crash dictation.
+- Misleading "Speech detected. Streaming audio to model server..." log line
+  that printed before recording had even started.
+- Unbounded growth of the diagnostics directory (now pruned to the newest
+  200 records).
+
 ## [1.0.0] - 2026-06-15
 
 First stable release. The CLI, on-disk layout, and wire protocol are now

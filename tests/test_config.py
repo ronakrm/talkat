@@ -145,3 +145,79 @@ def test_malformed_system_config_does_not_block_user_layer(
     assert cfg["http_timeout"] == 17
     # Defaults fill in for anything the user didn't set.
     assert cfg["model_type"] == CODE_DEFAULTS["model_type"]
+
+
+# ---------------------------------------------------------------------------
+# save_app_config pruning — only user-set values are persisted
+# ---------------------------------------------------------------------------
+
+
+def test_save_prunes_values_equal_to_defaults(clean_config_file):
+    """Saving a full merged config must write only the keys that differ.
+
+    Persisting defaults freezes them: the user silently stops receiving
+    default improvements for every key in the file. Regression test for the
+    calibrate-saves-everything bug.
+    """
+    full = load_app_config()  # all defaults
+    full["silence_threshold"] = 129.5  # the one genuinely user-set value
+    save_app_config(full)
+
+    on_disk = json.loads(clean_config_file.read_text())
+    assert on_disk == {"silence_threshold": 129.5}
+
+
+def test_save_drops_keys_unknown_to_this_version(clean_config_file):
+    """Dead keys from older releases are dropped on save, not re-persisted."""
+    save_app_config(
+        {
+            "silence_threshold": 300.0,
+            "long_mode_max_duration": 600.0,  # renamed in a past release
+            "distil_model_name": "distil-whisper/x",  # removed feature
+        }
+    )
+
+    on_disk = json.loads(clean_config_file.read_text())
+    assert on_disk == {"silence_threshold": 300.0}
+
+
+def test_save_keeps_all_non_default_values(clean_config_file):
+    """Every legitimately changed key survives the prune."""
+    save_app_config(
+        {
+            "silence_threshold": 300.0,
+            "model_name": "medium.en",
+            "input_device_name": "headset",
+            "focus_guard": False,
+        }
+    )
+
+    on_disk = json.loads(clean_config_file.read_text())
+    assert on_disk == {
+        "silence_threshold": 300.0,
+        "model_name": "medium.en",
+        "input_device_name": "headset",
+        "focus_guard": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# TALKAT_RUNTIME_DIR — a config-pinned socket must not defeat dev isolation
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_dir_override_forces_socket_over_config_pin(
+    clean_config_file, monkeypatch: pytest.MonkeyPatch
+):
+    from talkat.paths import SOCKET_FILE
+
+    clean_config_file.parent.mkdir(parents=True, exist_ok=True)
+    clean_config_file.write_text(json.dumps({"server_socket": "/tmp/pinned-elsewhere.sock"}))
+
+    monkeypatch.setenv("TALKAT_RUNTIME_DIR", "/tmp/talkat-dev-test")
+    cfg = load_app_config()
+    assert cfg["server_socket"] == str(SOCKET_FILE)
+
+    monkeypatch.delenv("TALKAT_RUNTIME_DIR")
+    cfg = load_app_config()
+    assert cfg["server_socket"] == "/tmp/pinned-elsewhere.sock"

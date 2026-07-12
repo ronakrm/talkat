@@ -39,85 +39,134 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - Supports Faster-Whisper (default) and Vosk models
 
 2. **Client** (`main.py`)
-   - Captures audio from microphone
-   - Implements Voice Activity Detection (VAD)
-   - Streams audio to server for transcription
-   - Types recognized text via ydotool (Wayland)
+   - Captures audio from microphone and streams it to the server
+   - Types recognized text via ydotool (Wayland), with a focus guard and
+     clipboard fallback — the transcript is never silently lost
    - **Toggle support**: PID file tracking for start/stop with same command
    - Graceful interruption handling via signals
 
-3. **Voice Activity Detection** (`record.py`)
-   - Sophisticated VAD with pre-speech padding (0.3s)
-   - Dynamic silence threshold calibration
-   - Streaming generator pattern for real-time processing
-   - Configurable silence duration detection
+3. **Audio capture** (`record.py`, `devices.py`)
+   - `AudioSession` streams **every** chunk from the moment the mic opens;
+     the calibrated threshold only decides when the utterance is over
+     (silence auto-stop). Client-side gating of what gets *sent* is exactly
+     how utterance beginnings used to get clipped — don't reintroduce it.
+   - Device index is resolved on the same PyAudio instance that opens the
+     stream (PortAudio snapshots topology per instance; PipeWire churns
+     indices), with one retry on a fresh instance.
+   - `input_device_name` config pins the capture device by name substring.
 
 4. **CLI Router** (`cli.py`)
    - Command routing and argument parsing
    - PID file management for toggle functionality
    - Background process management for long dictation
-   - Process lifecycle handling
+   - Heavy imports (file processing) are lazy — `talkat listen` is on the
+     hotkey hot path
 
 5. **Configuration** (`config.py`)
-   - Hierarchical config: defaults → file → CLI args
-   - JSON config at `~/.config/talkat/config.json`
+   - Hierarchical config: defaults → `/etc/talkat/config.json` →
+     `~/.config/talkat/config.json` → CLI args
+   - `save_app_config` persists **only** values that differ from
+     `CODE_DEFAULTS` and drops dead keys — never freeze defaults into the
+     user's file
    - Model cache at `~/.cache/talkat/`
    - Transcripts at `~/.local/share/talkat/transcripts/`
    - PID and lock files at `$XDG_RUNTIME_DIR/talkat/` (typically `/run/user/$UID/talkat/`), with a fallback to `~/.cache/talkat/runtime/` when `XDG_RUNTIME_DIR` is unavailable
+   - `TALKAT_RUNTIME_DIR` env var relocates the whole runtime dir (socket +
+     PIDs + locks) — the dev-isolation mechanism behind `./dev.sh`
+
+6. **Focus guard** (`focus.py`)
+   - Queries the focused window over compositor IPC (niri, Hyprland, sway)
+   - `listen` captures the window at recording start and refuses to type if
+     focus changed — transcript goes to the clipboard instead
+   - All failure paths return `None` = "guard off", never "focus changed"
+
+7. **Environment self-check** (`doctor.py`)
+   - `talkat doctor`: install origin, PATH/systemd shadowing, server health
+     + version skew, audio devices, ydotoold/clipboard/notification tooling
+   - First thing to run when behavior looks stale or inconsistent
 
 ## Development Workflow
 
+### The dual-install model (IMPORTANT)
+
+Daily use and development are deliberately separate installs:
+
+- **Daily driver**: the AUR package (`/usr/bin/talkat` + packaged systemd
+  unit `/usr/lib/systemd/user/talkat.service`). Desktop hotkeys resolve
+  `talkat` through PATH and hit this.
+- **Development**: this checkout, run via `./dev.sh` — which is
+  `uv run talkat` plus a `TALKAT_RUNTIME_DIR` override pointing at
+  `$XDG_RUNTIME_DIR/talkat-dev/`. The dev server binds its own socket and
+  the dev client uses its own PID/lock files, so testing the checkout can
+  never toggle, stop, or out-bind the installed service.
+
+Do NOT run `setup.sh` on a machine that has the AUR package — the uv-tool
+install shadows `/usr/bin/talkat` on PATH and its user systemd unit shadows
+the packaged unit, and the shadowing copy silently goes stale. (This
+happened; `talkat doctor` now detects it, and `setup.sh` warns.) `setup.sh`
+remains the install path for non-Arch systems only.
+
+To get code changes into daily use: tag a release and bump the AUR package
+(see Installation below), don't re-run `setup.sh`.
+
 ### Setup Development Environment
 ```bash
-# Clone repository
 git clone <repo>
 cd talkat
-
-# Install uv if not present
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install dependencies
 uv sync
 
-# Run development server
-uv run talkat server
-
-# In another terminal, test client
-uv run talkat listen
+# Dev server + client, isolated from any installed talkat:
+./dev.sh server     # terminal 1
+./dev.sh listen     # terminal 2
+./dev.sh doctor     # environment report as the dev build sees it
 ```
 
-### Testing Workflow
+### Automated tests
 ```bash
-# Start server in one terminal
-uv run talkat server
+uv run pytest                 # full suite (~430 tests, no mic/model needed)
+uv run pytest tests/test_vad.py -q
+uv run mypy src/talkat/       # strict typing is enforced in CI
+uvx ruff@0.1.14 format --check . && uvx ruff@0.1.14 check .  # CI-pinned ruff
+```
 
-# Test short dictation mode with toggle
-uv run talkat listen  # Starts recording
-uv run talkat listen  # Stops recording and transcribes
-
-# Test long dictation mode
-uv run talkat long
-
-# Test calibration
-uv run talkat calibrate
-
-# Test background long dictation
-uv run talkat start-long
-uv run talkat stop-long
-uv run talkat toggle-long
+### Manual testing workflow
+```bash
+# All through dev.sh so the installed service is untouched:
+./dev.sh listen       # toggle: run again to stop
+./dev.sh long
+./dev.sh calibrate
+./dev.sh start-long; ./dev.sh stop-long; ./dev.sh toggle-long
 ```
 
 ### Installation
 
 Talkat is a per-user dictation tool. Two supported install paths:
 
-#### Local install from a git checkout
+#### Packaged install (Arch / AUR) — the daily driver on this machine
+Install via an AUR helper (`yay -S talkat`). The package installs
+`/usr/bin/talkat` and ships `/usr/lib/systemd/user/talkat.service`
+(the repo's `talkat.service`). Enable with:
+```bash
+systemctl --user enable --now talkat
+```
+
+The PKGBUILD lives in the AUR git repo
+(`ssh://aur@aur.archlinux.org/talkat.git`), not in this source tree — that's
+standard Arch packaging convention. Release flow: bump `version` in
+`pyproject.toml` + stamp `CHANGELOG.md` → tag `vX.Y.Z` here → in the AUR
+clone, bump `pkgver`, run `updpkgsums`, regenerate `.SRCINFO`, push →
+`yay -Syu talkat` → `systemctl --user restart talkat` → `talkat doctor`
+to confirm client and server report the new version.
+
+#### Local install from a git checkout (non-Arch systems)
 ```bash
 ./setup.sh
 ```
 Runs `uv tool install --reinstall .` (creates an isolated venv under
 `~/.local/share/uv/tools/talkat/`) and then `talkat install-service` to write
 `~/.config/systemd/user/talkat.service` pointing at that venv's interpreter.
+Refuses (with a prompt) when a system-packaged talkat exists, because the
+uv-tool copy would shadow it.
 
 To uninstall:
 ```bash
@@ -125,41 +174,27 @@ talkat uninstall-service
 uv tool uninstall talkat
 ```
 
-#### Packaged install (Arch / AUR)
-Install via an AUR helper (`yay -S talkat`). The package installs to
-`/usr/lib/talkat/` and ships `/usr/lib/systemd/user/talkat.service`. Enable
-with:
-```bash
-systemctl --user enable --now talkat
-```
-
-The PKGBUILD lives in the AUR git repo
-(`ssh://aur@aur.archlinux.org/talkat.git`), not in this source tree — that's
-standard Arch packaging convention. Release flow: tag `vX.Y.Z` here → in
-the AUR clone, bump `pkgver`, run `updpkgsums`, regenerate `.SRCINFO`,
-push.
-
-**After code changes**, re-run `./setup.sh` to update the local install. It
-will restart the running service.
+**After code changes**: use `./dev.sh` for testing (no reinstall needed).
+On non-Arch machines where `setup.sh` IS the install, re-run it to update;
+it restarts the running service.
 
 ## Code Patterns and Conventions
 
 ### Type Hints
-- Use comprehensive type hints for all function signatures
-- Prefer specific types over `Any`
-- Use `Optional[T]` for nullable types
-- Use `Union[T1, T2]` for multiple types
-- Import types from `typing` module
+- mypy strict (`disallow_untyped_defs`) is enforced in CI — annotate everything
+- Use modern syntax: `float | None`, `list[str]`, `dict[str, Any]` (not
+  `Optional`/`List`/`Dict`)
+- Import collection ABCs from `collections.abc` (`Iterator`, `Callable`, ...)
 
 Example:
 ```python
-from typing import Optional, List, Dict, Generator, Tuple
+from collections.abc import Iterator
 
 def process_audio(
     data: bytes,
     sample_rate: int,
-    threshold: Optional[float] = None
-) -> Tuple[str, float]:
+    threshold: float | None = None,
+) -> tuple[str, float]:
     ...
 ```
 
@@ -192,68 +227,83 @@ finally:
 
 ### Audio Processing Patterns
 ```python
-# Generator pattern for streaming
-def stream_audio() -> Generator[bytes, None, None]:
-    stream = pyaudio.PyAudio().open(...)
-    try:
-        while True:
-            data = stream.read(CHUNK)
-            yield data
-    finally:
-        stream.stop_stream()
-        stream.close()
-
-# VAD with pre-buffering
-pre_buffer = collections.deque(maxlen=PRE_SPEECH_FRAMES)
-for chunk in audio_stream:
-    if voice_detected:
-        yield from pre_buffer  # Yield buffered audio
-        yield chunk
-    else:
-        pre_buffer.append(chunk)
+# AudioSession owns the PyAudio lifecycle; iterate it for chunks.
+with AudioSession(threshold=200.0) as session:
+    for chunk in session:      # every chunk from mic-open onward
+        send(chunk)
+# Iteration ends on: post-speech silence > silence_duration,
+# max_duration reached, or stop_event set.
 ```
+
+Key invariant: the threshold decides when to STOP, never what to SEND.
+Anything that drops audio client-side before the server sees it will clip
+utterance beginnings for quiet speakers — the server-side VAD filter is the
+component responsible for trimming silence.
 
 ## File Structure
 ```
 talkat/
 ├── src/talkat/
-│   ├── __init__.py      # Package marker
-│   ├── cli.py           # CLI entry point and command routing
-│   ├── config.py        # Configuration management
-│   ├── devices.py       # Audio device discovery
-│   ├── record.py        # VAD and audio recording
-│   ├── model_server.py  # Flask HTTP server
-│   ├── main.py          # Client orchestration
-│   └── file_processor.py # Audio file transcription
-├── setup.sh             # Installation script
-├── pyproject.toml       # Project configuration
-├── CLAUDE.md           # This file
-└── README.md           # User documentation
+│   ├── __init__.py       # Package marker
+│   ├── cli.py            # CLI entry point and command routing
+│   ├── main.py           # Client orchestration (listen/long, delivery)
+│   ├── record.py         # AudioSession (capture + silence auto-stop), calibration
+│   ├── devices.py        # Audio device discovery/pinning
+│   ├── focus.py          # Focused-window queries (niri/Hyprland/sway IPC)
+│   ├── model_server.py   # Flask + waitress server over unix socket
+│   ├── backends.py       # TranscriptionBackend Protocol + faster-whisper/Vosk
+│   ├── audio_utils.py    # Gain normalization, long-form segmentation
+│   ├── model_manager.py  # talkat model {list,download,use}
+│   ├── file_processor.py # Audio file/batch transcription client
+│   ├── postprocess.py    # AIPP: LLM cleanup via OpenAI-compatible endpoint
+│   ├── config.py         # Layered config load/save (save prunes defaults)
+│   ├── paths.py          # XDG paths + TALKAT_RUNTIME_DIR override
+│   ├── process_manager.py# flock-based locks, PID files, background procs
+│   ├── security.py       # Input validation, safe subprocess wrapper
+│   ├── clipboard.py      # wl-copy → xclip fallback
+│   ├── diagnostics.py    # Per-run diagnostics JSON (+retention)
+│   ├── doctor.py         # talkat doctor environment self-check
+│   ├── logging_config.py # Logging setup (console + rotating file)
+│   └── service.py        # install/uninstall the user systemd unit
+├── tests/                # pytest suite (~430 tests; no mic/model needed)
+├── dev.sh                # Run the checkout against an isolated runtime dir
+├── setup.sh              # uv-tool install (non-Arch systems)
+├── talkat.service        # Unit shipped by the Arch package
+├── pyproject.toml        # Project configuration
+├── CLAUDE.md             # This file
+└── README.md             # User documentation
 ```
 
 ## Common Tasks
 
 ### Adding a New Command
-1. Add parser in `cli.py`
+1. Add parser in `cli.py` (keep heavy imports lazy in the dispatch branch)
 2. Implement handler function in appropriate module
-3. Update CLAUDE.md and README.md
-4. Run `./setup.sh` to update the installed version
+3. Add tests; update CLAUDE.md and README.md
+4. Verify with `./dev.sh <command>` — don't reinstall
 
 ### Adding a New Model Backend
-1. Create model loader in `model_server.py`
-2. Add configuration option in `config.py`
-3. Implement transcription method
+1. Implement the `TranscriptionBackend` Protocol in `backends.py`
+2. Register it in `create_backend`
+3. Add configuration option in `config.py` (+ validation in `security.py`)
 4. Add model download logic
 
-### Improving VAD
-1. Modify `stream_audio_with_vad()` in `record.py`
-2. Adjust pre-speech padding and silence detection
-3. Test with various audio environments
+### Changing capture / silence-stop behavior
+1. Modify `AudioSession.__iter__` in `record.py`
+2. Preserve the invariant: threshold decides when to stop, never what to send
+3. Update `tests/test_vad.py`; test with quiet speakers and noisy rooms
 
 ## Testing Checklist
 
-### Manual Testing Required
-Since no automated tests exist, these need manual verification:
+### Automated tests
+
+`uv run pytest` covers config, security, VAD/AudioSession, listen/long
+modes, focus guard, doctor, process manager, file processor, CLI dispatch,
+AIPP, and integration paths over a real Flask+waitress UDS server. CI runs
+the suite on Python 3.11–3.14 plus ruff (pinned 0.1.14) and strict mypy.
+
+### Manual verification (audio hardware paths)
+Things the suite can't cover — worth a manual pass before a release:
 
 1. **Basic Functionality**
    - [ ] Server starts successfully
@@ -325,38 +375,42 @@ Since no automated tests exist, these need manual verification:
 
 ## Future Improvements
 
+See `docs/future-work.md` for the considered-and-deferred list (multi-engine
+cross-check is the headline deferred design).
+
 ### High Priority
-1. ~~Add toggle functionality for listen mode~~ ✅ Completed
-2. Add comprehensive type hints throughout
-3. Implement proper logging framework
-4. Add automated tests
-5. ~~Support audio file input (.wav, .mp3)~~ ✅ Completed
-6. Improve error messages and user feedback
+1. ~~Add toggle functionality for listen mode~~ ✅
+2. ~~Comprehensive type hints~~ ✅ (mypy strict in CI)
+3. ~~Proper logging framework~~ ✅ (`logging_config.py`, rotating file log)
+4. ~~Automated tests~~ ✅ (~430 tests + CI)
+5. ~~Support audio file input (.wav, .mp3)~~ ✅
+6. ~~Never lose a transcript on delivery failure~~ ✅ (clipboard fallback)
+7. Keep the mic open across utterances in long mode (today it reopens per
+   utterance; speech during the reopen gap is lost)
 
 ### Medium Priority
-1. WebSocket support for real-time streaming
-2. Multiple language support
+1. Multi-engine ASR cross-check (see docs/future-work.md sketch)
+2. WebSocket / bidirectional streaming with partial results
 3. Custom wake word detection
-4. Punctuation and capitalization models
-5. Speaker diarization for meetings
+4. Speaker diarization for meetings
 
 ### Low Priority
 1. GUI configuration tool
 2. Cloud model support
-3. Mobile app companion
-4. Integration with other desktop environments
+3. Integration with other desktop environments
 
 ## Dependencies
 
 ### Python Packages
-- `faster-whisper>=1.1.1` - Primary ASR engine
-- `vosk>=0.3.45` - Alternative ASR engine
-- `pyaudio>=0.2.14` - Audio I/O
-- `numpy>=2.2.6` - Array operations
-- `flask>=2.0` - HTTP server
-- `requests>=2.20` - HTTP client
-- `librosa>=0.10.1` - Audio file processing
-- `soundfile>=0.12.1` - Audio file I/O
+- `faster-whisper` - Primary ASR engine
+- `vosk` - Alternative ASR engine
+- `pyaudio` - Audio I/O
+- `numpy` - Array operations
+- `flask` + `waitress` - HTTP server over unix socket
+- `httpx` - HTTP client (unix-socket transport)
+- `librosa` + `soundfile` - Audio file processing
+
+(Exact version bounds live in `pyproject.toml` — that's the source of truth.)
 
 ### System Requirements
 - `ydotool` - Wayland input automation
@@ -367,23 +421,36 @@ Since no automated tests exist, these need manual verification:
 
 ## Debugging Tips
 
-### Known Issues and Hacks
+### Known Issues and Design Notes
 
-#### Major Hacks/Workarounds
-1. **PID file management** - Basic file-based approach, should use proper IPC
-2. **Signal handling** - Interrupt handling is fragile
-3. **Audio stream cleanup** - Not always properly cleaned up on errors
-4. **Hardcoded timeouts** - Many timeouts should be configurable
-5. **ALSA warnings** - Suppressed rather than properly handled
-6. **Error messages** - Often generic, need more context
+Resolved former known-bugs (kept here so they aren't re-reported):
+- ~~500 errors on long recordings~~ → long-form segmentation
+  (`audio_utils.segment_long_audio`, `max_segment_seconds`)
+- ~~PID file races~~ → `flock`-based `ProcessManager.locked()` + atomic PID
+  writes
+- ~~Device selection falls back without proper error~~ → same-instance
+  resolution + retry + `input_device_name` pin; failures raise
+  `AudioSessionError` with a notification
+- ~~Cut-off utterance beginnings~~ → stream-from-open (threshold only stops)
+- ~~Transcript lost when typing fails~~ → clipboard/stdout fallback chain
 
-#### Known Bugs
-1. **Server errors on long recordings** - 500 errors after max duration
-2. **PID file race conditions** - Possible if commands run too quickly
-3. **Audio device selection** - Falls back to default without proper error
-4. **Memory leaks** - Possible in long-running server with certain models
+Still true / watch out for:
+1. **Signal handling is subtle** — the SIGINT handler sets the stop event
+   AND raises `KeyboardInterrupt` to unblock httpx (PEP 475). It works;
+   change it only with real-hardware toggle testing.
+2. **Long mode reopens the mic between utterances** — speech during that
+   ~0.3 s gap is lost (tracked in Future Improvements).
+3. **ALSA/JACK init noise** is fd-level suppressed
+   (`_suppress_native_stderr`), so genuine PortAudio warnings are also
+   hidden inside that block.
+4. **Memory** — unverified suspicion of slow growth in a long-running
+   server with certain models; no reproduction yet.
 
 ### Common Issues
+
+0. **Anything looks stale or inconsistent** → `talkat doctor` first. It
+   catches the big one: a stale uv-tool install (PATH) or user systemd unit
+   shadowing the AUR package, i.e. you're not running the code you think.
 
 1. **"Server not responding"**
    - Check: `systemctl --user status talkat`
@@ -393,26 +460,25 @@ Since no automated tests exist, these need manual verification:
 
 2. **"No audio input"**
    - Check: `pactl list sources`
-   - Try: `uv run talkat calibrate`
-   - Verify: PyAudio installation
+   - Try: `talkat calibrate`
+   - Pin a device: `"input_device_name"` in config
 
 3. **"Text not typing"**
-   - Check: ydotoold is running
-   - Verify: Wayland compositor compatibility
+   - Check: ydotoold is running (`talkat doctor` shows the socket)
+   - If focus moved mid-dictation the focus guard diverts to the clipboard
+     by design (`focus_guard: false` disables)
    - Test: `ydotool type "test"`
 
 4. **"Toggle not working"**
    - Check PID file: `ls "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/listen.pid"`
    - Clean up stale PIDs: `rm "${XDG_RUNTIME_DIR:-/run/user/$UID}"/talkat/*.pid`
-   - Update installation: `./setup.sh --user` or `sudo ./setup.sh`
 
 ### Debug Mode
-```python
-# Enable debug output
-DEBUG = True  # In relevant module
-
-# Or via environment
-DEBUG=1 uv run talkat listen
+```bash
+talkat -v listen        # DEBUG logging (console + file)
+talkat --debug listen   # DEBUG + background process output to log files
+TALKAT_DEBUG=1 talkat listen   # env-var equivalent
+# Rotating log file: ~/.local/share/talkat/logs/talkat.log
 ```
 
 ### Performance Profiling

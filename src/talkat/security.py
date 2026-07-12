@@ -229,14 +229,18 @@ def validate_command(command: list[str]) -> list[str]:
     if not command:
         raise ValueError("Command cannot be empty")
 
-    # Check for shell metacharacters that could lead to injection
-    dangerous_chars = [";", "&", "|", "`", "$", "(", ")", "{", "}", "<", ">", "\\n", "\\r"]
-    for arg in command:
-        for char in dangerous_chars:
-            if char in str(arg):
-                raise SecurityError(
-                    f"Potentially dangerous character '{char}' in command argument: {arg}"
-                )
+    # We always exec with shell=False, so shell metacharacters in *arguments*
+    # are inert data — a transcript like "$20 (roughly)" must be typeable and
+    # notifiable verbatim. Only the executable name itself is checked: a
+    # metacharacter there means something tainted was spliced into the
+    # command, not legitimate data.
+    dangerous_chars = [";", "&", "|", "`", "$", "(", ")", "{", "}", "<", ">", "\n", "\r"]
+    executable = str(command[0])
+    for char in dangerous_chars:
+        if char in executable:
+            raise SecurityError(
+                f"Potentially dangerous character {char!r} in command name: {executable}"
+            )
 
     # Whitelist known safe commands
     safe_commands = [
@@ -248,6 +252,10 @@ def validate_command(command: list[str]) -> list[str]:
         "aplay",
         "ffmpeg",
         "sox",
+        # Compositor IPC clients used by the focus guard (read-only queries).
+        "niri",
+        "swaymsg",
+        "hyprctl",
     ]
 
     cmd_name = os.path.basename(command[0])
@@ -400,6 +408,9 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         "lock_retry_interval": (0, 10),
         "process_check_interval": (0, 10),
         "background_process_delay": (0, 60),
+        "audio_target_rms_dbfs": (-60, 0),
+        "audio_max_gain_db": (0, 60),
+        "max_segment_seconds": (5, 3600),
     }
     for param, (min_val, max_val) in numeric_params.items():
         if param in config:
@@ -410,7 +421,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
             except (ValueError, TypeError) as e:
                 raise ValueError(f"Invalid {param}: {config[param]}") from e
 
-    bool_params = ["clipboard_on_long", "save_transcripts"]
+    bool_params = ["clipboard_on_long", "save_transcripts", "audio_normalize_gain", "focus_guard"]
     for param in bool_params:
         if param in config and not isinstance(config[param], bool):
             raise ValueError(f"{param} must be boolean, got {type(config[param])}")
@@ -420,6 +431,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         "fw_device": ["cpu", "cuda", "auto"],
         "fw_compute_type": ["int8", "float16", "float32"],
         "device": ["cpu", "cuda", "auto"],
+        "output_mode": ["type", "clipboard"],
     }
     for param, choices in choice_params.items():
         if param in config and config[param] not in choices:
@@ -444,9 +456,10 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         config["postprocess_profiles"] = validated_profiles
 
     # Bounded free-form strings — guard against accidental DoS via huge values.
-    string_max_len: dict[str, int] = {}
+    # ``None`` is allowed and means "unset" (these keys are optional pins).
+    string_max_len: dict[str, int] = {"input_device_name": 256}
     for param, maxlen in string_max_len.items():
-        if param in config:
+        if param in config and config[param] is not None:
             if not isinstance(config[param], str):
                 raise ValueError(f"{param} must be a string, got {type(config[param])}")
             if len(config[param]) > maxlen:

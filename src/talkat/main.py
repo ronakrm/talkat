@@ -4,11 +4,10 @@ import contextlib
 import json
 import os
 import signal
-import subprocess
 import threading
 import time
 import traceback
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import datetime
 from pathlib import Path
 from types import FrameType, TracebackType
@@ -18,6 +17,8 @@ import httpx
 
 from .clipboard import copy_to_clipboard
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
+from .diagnostics import build_record, write_record
+from .focus import get_focused_window
 from .logging_config import get_logger
 from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager
@@ -57,9 +58,11 @@ def save_transcript(text: str, mode: str = "short") -> Path:
 
 
 def _notify(message: str) -> None:
-    """Send a desktop notification, ignoring failure (notify-send may be missing)."""
-    with contextlib.suppress(FileNotFoundError):
+    """Send a desktop notification; a notification failure must never break dictation."""
+    try:
         safe_subprocess_run(["notify-send", "Talkat", message], check=False)
+    except Exception as e:
+        logger.debug(f"Notification failed: {e}")
 
 
 def _log_threshold_source(threshold: float) -> None:
@@ -88,6 +91,15 @@ class TranscriptionClient:
         # server has its own config default; we only send this if the client
         # has one configured, so an older server build still works.
         self.language: str | None = config.get("language")
+        # Server response metadata from the most recent transcribe call —
+        # audio duration, applied gain, ASR wall-clock. Populated after every
+        # ``transcribe_one_utterance``; old servers without these fields just
+        # leave the values at 0 / 0.0.
+        self.last_metadata: dict[str, float] = {
+            "audio_duration": 0.0,
+            "applied_gain_db": 0.0,
+            "asr_seconds": 0.0,
+        }
         transport = httpx.HTTPTransport(uds=self.socket_path)
         self._client = httpx.Client(transport=transport, timeout=self.http_timeout)
 
@@ -110,9 +122,15 @@ class TranscriptionClient:
         stop_event: threading.Event | None = None,
         max_duration: float | None = None,
         debug: bool = False,
+        on_recording_started: Callable[[], None] | None = None,
     ) -> str:
         """
         Record one utterance and return its transcription.
+
+        ``on_recording_started`` fires once the microphone stream is actually
+        open — the earliest moment speech is being captured. "Start speaking"
+        cues belong there; firing them earlier (before device setup, which
+        takes hundreds of ms) is how utterance beginnings get lost.
 
         Returns the transcribed text (possibly empty if no speech detected).
         Raises ``AudioSessionError`` on microphone failure, ``TranscriptionUnreachable``
@@ -126,6 +144,8 @@ class TranscriptionClient:
             stop_event=stop_event,
             debug=debug,
         ) as session:
+            if on_recording_started is not None:
+                on_recording_started()
             metadata: dict[str, Any] = {"rate": session.sample_rate}
             if self.language:
                 metadata["language"] = self.language
@@ -152,11 +172,35 @@ class TranscriptionClient:
                 raise TranscriptionServerError(f"Error communicating with model server: {e}") from e
 
             try:
-                return str(response.json().get("text", "")).strip()
+                payload = response.json()
             except json.JSONDecodeError as e:
                 raise TranscriptionServerError(
                     f"Could not decode JSON response from server: {response.text}"
                 ) from e
+
+            # Cache server-side metadata for diagnostics. Missing keys (older
+            # server build that pre-dates this) collapse to 0 — fine; the
+            # diagnostics record just shows zeros instead of crashing.
+            self.last_metadata = {
+                "audio_duration": float(payload.get("audio_duration", 0.0) or 0.0),
+                "applied_gain_db": float(payload.get("applied_gain_db", 0.0) or 0.0),
+                "asr_seconds": float(payload.get("asr_seconds", 0.0) or 0.0),
+            }
+            return str(payload.get("text", "")).strip()
+
+
+def _fetch_server_info(socket_path: str) -> tuple[str | None, str | None]:
+    """Best-effort fetch of model_type / model_name from /health for diagnostics."""
+    try:
+        transport = httpx.HTTPTransport(uds=socket_path)
+        with httpx.Client(transport=transport, timeout=2.0) as client:
+            r = client.get("http://talkat/health")
+            if r.status_code != 200:
+                return None, None
+            data = r.json()
+            return data.get("model_type"), data.get("model_name")
+    except (httpx.HTTPError, json.JSONDecodeError, OSError):
+        return None, None
 
 
 def _set_stop_event_on_signal(stop_event: threading.Event) -> None:
@@ -230,13 +274,32 @@ def listen_once(
         float(config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"]))
     )
 
-    _notify('Recording... Run "talkat listen" again to stop')
-    logger.info("Speech detected. Streaming audio to model server...")
-    logger.info("(Run 'talkat listen' again to stop recording)")
+    # The focus guard compares against the window focused at invocation time —
+    # that's the window the user intends to dictate into.
+    focus_before: str | None = None
+    if config.get("focus_guard", CODE_DEFAULTS["focus_guard"]):
+        focus_before = get_focused_window()
 
+    def _announce_recording() -> None:
+        logger.info("Recording — speak now. (Run 'talkat listen' again to stop.)")
+        _notify('Recording... Run "talkat listen" again to stop')
+
+    server_metadata: dict[str, float] = {
+        "audio_duration": 0.0,
+        "applied_gain_db": 0.0,
+        "asr_seconds": 0.0,
+    }
     try:
         with TranscriptionClient(config) as client:
-            text = client.transcribe_one_utterance(stop_event=stop_event, debug=True)
+            text = client.transcribe_one_utterance(
+                stop_event=stop_event,
+                debug=True,
+                on_recording_started=_announce_recording,
+            )
+            # ``last_metadata`` is set by the real client after each call;
+            # test stubs may not have it. Default to zeros so diagnostics
+            # still write a valid record.
+            server_metadata = getattr(client, "last_metadata", server_metadata)
     except AudioSessionError as e:
         logger.error(str(e))
         _notify(f"Audio error: {e}")
@@ -283,24 +346,108 @@ def listen_once(
         logger.info(f"Transcription saved to: {output_path}")
         _notify(f"Saved to: {output_path.name}")
     else:
-        try:
-            safe_text = sanitize_text_for_typing(text)
-            # timeout=None: typing a long transcript with --key-delay=1 can take
-            # well over the default 30s.
-            safe_subprocess_run(
-                ["ydotool", "type", "--key-delay=1", safe_text],
-                check=True,
-                timeout=None,
-            )
-            logger.info(f"Typed: {text}")
-            _notify(f"Typed: {text[:100]}")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            logger.warning("ydotool not available, printing text instead:")
-            print(f"TEXT: {text}")
-            _notify(f"Recognized: {text[:100]}")
+        _deliver_text(text, config, focus_before)
+
+    _write_diagnostics_for_listen(
+        config=config,
+        mode="listen",
+        text=text,
+        server_metadata=server_metadata,
+        postprocess=postprocess,
+    )
 
     pm.cleanup_pid_file()
     return 0
+
+
+def _deliver_text(text: str, config: dict[str, Any], focus_before: str | None) -> None:
+    """Deliver the transcript: type it into the focused window, else clipboard.
+
+    The invariant this function maintains: the transcript is never silently
+    lost. Every failure path lands it in the clipboard or, failing that, on
+    stdout — with a notification saying where it went.
+    """
+    if config.get("output_mode", CODE_DEFAULTS["output_mode"]) == "clipboard":
+        if copy_to_clipboard(text):
+            logger.info(f"Copied to clipboard: {text}")
+            _notify(f"Copied: {text[:100]}")
+        else:
+            logger.warning("Clipboard unavailable (wl-copy/xclip missing), printing instead:")
+            print(f"TEXT: {text}")
+            _notify(f"Recognized: {text[:100]}")
+        return
+
+    # Focus guard: if the user switched windows while dictating, typing would
+    # splatter the transcript into the wrong app. Both sides must be known to
+    # conclude "changed" — an IPC failure disables the guard, not typing.
+    if focus_before is not None:
+        focus_now = get_focused_window()
+        if focus_now is not None and focus_now != focus_before:
+            logger.warning(
+                f"Focused window changed during dictation ({focus_before} -> {focus_now}); "
+                "not typing into it."
+            )
+            if copy_to_clipboard(text):
+                _notify("Focus changed — transcript copied to clipboard.")
+            else:
+                print(f"TEXT: {text}")
+                _notify("Focus changed — transcript printed to console.")
+            return
+
+    try:
+        safe_text = sanitize_text_for_typing(text)
+        # timeout=None: typing a long transcript with --key-delay=1 can take
+        # well over the default 30s.
+        safe_subprocess_run(
+            ["ydotool", "type", "--key-delay=1", safe_text],
+            check=True,
+            timeout=None,
+        )
+        logger.info(f"Typed: {text}")
+        _notify(f"Typed: {text[:100]}")
+    except Exception as e:
+        # Typing fails in many ways — ydotool missing, ydotoold not running,
+        # a crash mid-type. The transcript must survive all of them.
+        logger.warning(f"Typing failed ({e}); falling back to clipboard.")
+        if copy_to_clipboard(text):
+            _notify("Typing failed — transcript copied to clipboard.")
+        else:
+            print(f"TEXT: {text}")
+            _notify(f"Recognized: {text[:100]}")
+
+
+def _write_diagnostics_for_listen(
+    *,
+    config: dict[str, Any],
+    mode: str,
+    text: str,
+    server_metadata: dict[str, float],
+    postprocess: str | None,
+) -> None:
+    """Build + write a diagnostics record for an interactive dictation run.
+
+    Diagnostics are advisory: any failure inside is swallowed so the user
+    never loses dictation because a JSON write hit ENOSPC or similar.
+    """
+    try:
+        socket_path = config.get("server_socket", CODE_DEFAULTS["server_socket"])
+        model_type, model_name = _fetch_server_info(socket_path)
+        record = build_record(
+            mode=mode,
+            audio_duration=server_metadata.get("audio_duration", 0.0),
+            asr_seconds=server_metadata.get("asr_seconds", 0.0),
+            applied_gain_db=server_metadata.get("applied_gain_db", 0.0),
+            model_type=model_type,
+            model_name=model_name,
+            transcript_chars=len(text),
+            transcript_words=len(text.split()) if text else 0,
+            postprocess_profile=postprocess,
+        )
+        path = write_record(record)
+        if path:
+            logger.debug(f"Diagnostics written to: {path}")
+    except Exception as e:  # noqa: BLE001 — diagnostics must never block dictation
+        logger.debug(f"Diagnostics skipped (non-fatal): {e}")
 
 
 def listen_continuous(
@@ -380,6 +527,13 @@ def listen_continuous(
     session_start = time.monotonic()
     last_speech_at = session_start
 
+    # Diagnostics aggregates across the whole long-mode session — one record
+    # per session, not per utterance. Per-utterance would be diagnostics spam.
+    diag_audio_duration = 0.0
+    diag_asr_seconds = 0.0
+    diag_gain_samples: list[float] = []
+    diag_errors: list[str] = []
+
     try:
         with TranscriptionClient(config) as client:
             while not stop_event.is_set():
@@ -403,9 +557,16 @@ def listen_continuous(
                         debug=False,
                     )
                     consecutive_errors = 0
+                    metadata = getattr(client, "last_metadata", {})
+                    diag_audio_duration += metadata.get("audio_duration", 0.0)
+                    diag_asr_seconds += metadata.get("asr_seconds", 0.0)
+                    gain = metadata.get("applied_gain_db", 0.0)
+                    if gain:
+                        diag_gain_samples.append(gain)
                 except TranscriptionUnreachable as e:
                     logger.error(str(e))
                     _notify("Error: Model server not reachable.")
+                    diag_errors.append(f"unreachable: {e}")
                     return_code = 1
                     break
                 except TranscriptionServerError as e:
@@ -413,6 +574,7 @@ def listen_continuous(
                     if stop_event.is_set():
                         break
                     consecutive_errors += 1
+                    diag_errors.append(f"server_error: {e}")
                     if consecutive_errors >= max_consecutive_errors:
                         logger.error(
                             f"Aborting long dictation after "
@@ -427,6 +589,7 @@ def listen_continuous(
                     continue
                 except AudioSessionError as e:
                     logger.error(f"Audio error: {e}")
+                    diag_errors.append(f"audio: {e}")
                     return_code = 1
                     break
 
@@ -484,6 +647,32 @@ def listen_continuous(
         else:
             logger.info("No transcript to save (no speech detected)")
             _notify("Stopped. No speech detected.")
+
+        try:
+            socket_path = config.get("server_socket", CODE_DEFAULTS["server_socket"])
+            model_type, model_name = _fetch_server_info(socket_path)
+            mean_gain = (
+                sum(diag_gain_samples) / len(diag_gain_samples) if diag_gain_samples else 0.0
+            )
+            record = build_record(
+                mode="long",
+                audio_duration=diag_audio_duration,
+                asr_seconds=diag_asr_seconds,
+                applied_gain_db=mean_gain,
+                model_type=model_type,
+                model_name=model_name,
+                transcript_chars=len(full_text),
+                transcript_words=len(full_text.split()) if full_text else session_word_count,
+                postprocess_profile=postprocess,
+                errors=diag_errors,
+                extra={
+                    "session_seconds": round(time.monotonic() - session_start, 3),
+                    "utterances_with_gain_boost": len(diag_gain_samples),
+                },
+            )
+            write_record(record)
+        except Exception as e:  # noqa: BLE001 — diagnostics never block dictation
+            logger.debug(f"Long-mode diagnostics skipped (non-fatal): {e}")
 
         pm.cleanup_pid_file()
 

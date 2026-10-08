@@ -99,6 +99,9 @@ def validate_model_name(model_name: str) -> str:
     Raises:
         ValueError: If model name is invalid
     """
+    if not isinstance(model_name, str):
+        raise ValueError(f"model name must be a string, got {model_name!r}")
+
     # Allow alphanumeric, dots, dashes, underscores, and forward slashes
     if not re.match(r"^[a-zA-Z0-9._/-]+$", model_name):
         raise ValueError(f"Invalid model name: {model_name}")
@@ -360,26 +363,70 @@ def validate_audio_params(
     return sample_rate, channels, chunk_size
 
 
+def validate_config_path(name: str, value: object) -> str:
+    """A path setting from config.json: absolute once ``~`` is expanded.
+
+    Config files are the user's own input, trusted like the user, so symlinks
+    and ``..`` are fine here — a model cache symlinked onto a bigger disk is
+    normal. The traversal and symlink checks in :func:`validate_file_path` are
+    for paths that arrive from elsewhere. Relative paths are refused: they
+    would resolve against whatever directory each talkat process started in.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty string, got {value!r}")
+    if "\x00" in value or len(value) > 4096:
+        raise ValueError(f"{name} is not a usable path: {value[:80]!r}")
+    try:
+        path = Path(value).expanduser()
+    except RuntimeError as e:  # "~someone" with no such user
+        raise ValueError(f"{name} can't be expanded: {e}") from e
+    if not path.is_absolute():
+        raise ValueError(f"{name} must be an absolute path (or start with ~), got {value!r}")
+    return str(path)
+
+
+def _validate_number(name: str, value: object, low: float, high: float, whole: bool) -> int | float:
+    """A JSON number in ``[low, high]``: an int for whole-number settings, else a float.
+
+    Strings and booleans are refused even though ``float()`` would take them —
+    ``"0"`` as a GPU index or ``true`` as a count only fails later, far from
+    the config file that caused it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    if not low <= value <= high:  # NaN fails this too
+        raise ValueError(f"{name} must be between {low:g} and {high:g}, got {value!r}")
+    if whole:
+        if value != int(value):
+            raise ValueError(f"{name} must be a whole number, got {value!r}")
+        return int(value)
+    return float(value)
+
+
 def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
     """
     Validate configuration dictionary.
+
+    Every key in ``CODE_DEFAULTS`` must be checked here — loading relies on it
+    to keep bad values out, one key at a time (see ``config._read_layer``).
 
     Args:
         config: Configuration dictionary
 
     Returns:
-        Validated configuration
+        Validated configuration, values normalized (paths expanded, numbers
+        as int or float to match their defaults)
 
     Raises:
         ValueError: If configuration is invalid
-        SecurityError: If a path is unsafe
     """
+    from .config import CODE_DEFAULTS
+
     if "model_name" in config:
         config["model_name"] = validate_model_name(config["model_name"])
 
     path_keys = [
         "transcript_dir",
-        "model_cache_dir",
         "faster_whisper_model_cache_dir",
         "vosk_model_base_dir",
         "dictionary_file",
@@ -387,14 +434,13 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
     ]
     for key in path_keys:
         if key in config:
-            config[key] = str(validate_file_path(config[key], must_exist=False))
+            config[key] = validate_config_path(key, config[key])
 
     numeric_params: dict[str, tuple[float, float]] = {
         "silence_threshold": (0, 10000),
         "silence_threshold_fallback": (0, 10000),
         "silence_threshold_min": (0, 10000),
         "silence_threshold_max": (0, 10000),
-        "pre_speech_padding": (0, 10),
         "max_recording_duration": (0, 3600),
         "idle_timeout": (5, 86400),
         "idle_notify_interval": (5, 3600),
@@ -403,6 +449,7 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         "http_timeout": (0, 3600),
         "health_check_timeout": (0, 60),
         "file_processing_timeout_base": (0, 3600),
+        "max_upload_size_mb": (1, 2048),
         "process_stop_timeout": (0, 300),
         "lock_acquire_timeout": (0, 300),
         "lock_retry_interval": (0, 10),
@@ -414,23 +461,18 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
     }
     for param, (min_val, max_val) in numeric_params.items():
         if param in config:
-            try:
-                val = float(config[param])
-                if not min_val <= val <= max_val:
-                    raise ValueError(f"{param} must be between {min_val} and {max_val}")
-            except (ValueError, TypeError) as e:
-                raise ValueError(f"Invalid {param}: {config[param]}") from e
+            whole = isinstance(CODE_DEFAULTS.get(param), int)
+            config[param] = _validate_number(param, config[param], min_val, max_val, whole)
 
     bool_params = ["save_transcripts", "audio_normalize_gain", "focus_guard"]
     for param in bool_params:
         if param in config and not isinstance(config[param], bool):
-            raise ValueError(f"{param} must be boolean, got {type(config[param])}")
+            raise ValueError(f"{param} must be true or false, got {config[param]!r}")
 
     choice_params = {
         "model_type": ["faster-whisper", "vosk"],
         "fw_device": ["cpu", "cuda", "auto"],
         "fw_compute_type": ["int8", "float16", "float32"],
-        "device": ["cpu", "cuda", "auto"],
         "output_mode": ["type", "clipboard"],
     }
     for param, choices in choice_params.items():

@@ -83,7 +83,7 @@ def ensure_user_directories() -> None:
 def get_config_file() -> Path:
     """Return the writable user config file path.
 
-    This is the path ``save_app_config`` writes to and the one users edit
+    This is the path ``update_user_config`` writes to and the one users edit
     by hand. For loading the effective config, callers want
     :func:`get_config_files` — it returns the full merge chain instead of
     a single file.

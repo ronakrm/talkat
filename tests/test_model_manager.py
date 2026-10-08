@@ -341,12 +341,25 @@ def test_use_model_returns_cached_true_when_model_present(
 
     # Seed the user config with our test cache dir so use_model's internal
     # list_models() sees the synthetic HF layout.
-    from talkat.config import save_app_config
+    from talkat.config import update_user_config
 
-    save_app_config({"faster_whisper_model_cache_dir": str(cache)})
+    update_user_config({"faster_whisper_model_cache_dir": str(cache)})
 
     _config_path, cached = use_model("small.en")
     assert cached is True
+
+
+def test_use_model_leaves_an_unparseable_config_alone(clean_config_file):
+    """Overwriting it would throw away everything else the user had set."""
+    from talkat.config import ConfigFileError
+
+    clean_config_file.parent.mkdir(parents=True, exist_ok=True)
+    clean_config_file.write_text("{ broken json")
+
+    with pytest.raises(ConfigFileError):
+        use_model("tiny.en")
+
+    assert clean_config_file.read_text() == "{ broken json"
 
 
 def test_use_model_rejects_unknown_name(clean_config_file):

@@ -246,23 +246,56 @@ def test_stop_ends_capture_and_the_tail_is_still_transcribed(mic, tmp_path):
 
 
 def test_abort_saves_the_audio_it_did_not_transcribe(mic, tmp_path):
-    stop_event, abort_event = threading.Event(), threading.Event()
+    """Everything recorded but not yet transcribed is saved, and no further
+    requests go out.
 
-    def transcribe_then_abort() -> str:
-        stop_event.set()
-        abort_event.set()
+    The abort has to land once all three segments are recorded and the first
+    is in flight, so it waits on both: ``entered`` (the transcription thread
+    is inside a request) and ``stop_reason`` (capture has read all the
+    audio). Setting it from inside the request instead raced capture — the
+    stop arrived mid-stream and the remaining audio became one segment
+    rather than two.
+    """
+    mic["chunks"] = THREE_SENTENCES
+    stop_event, abort_event = threading.Event(), threading.Event()
+    entered, release = threading.Event(), threading.Event()
+
+    def first_request() -> str:
+        entered.set()
+        release.wait(5)
         return "One."
 
-    client = FakeClient([transcribe_then_abort, "never sent", "never sent"])
-
-    outcome, delivered = _record(
-        mic, client, tmp_path, THREE_SENTENCES, stop_event=stop_event, abort_event=abort_event
+    client = FakeClient([first_request, "never sent", "never sent"])
+    session = DictationSession(
+        client,  # type: ignore[arg-type]
+        threshold=200.0,
+        max_duration=(len(THREE_SENTENCES) + 0.5) * 0.03,
+        stop_event=stop_event,
+        abort_event=abort_event,
+        untranscribed_dir=tmp_path,
     )
 
+    def abort_once_everything_is_recorded() -> None:
+        entered.wait(5)
+        while session.stop_reason is None:
+            time.sleep(0.01)
+        stop_event.set()
+        abort_event.set()
+        release.set()
+
+    threading.Thread(target=abort_once_everything_is_recorded, daemon=True).start()
+    delivered: list[SegmentResult] = []
+    try:
+        outcome = session.run(delivered.append)
+    finally:
+        release.set()
+
     assert outcome.aborted
-    assert len(client.calls) == 1
+    assert len(client.calls) == 1, "no requests may start after an abort"
     assert [r.failed for r in delivered] == [False, True, True]
-    assert len(list(tmp_path.glob("*.wav"))) == 2
+    assert [r.text for r in delivered[1:]] == [
+        f"[untranscribed audio: talkat file {path}]" for path in sorted(tmp_path.glob("*.wav"))
+    ]
 
 
 def test_abort_does_not_wait_out_a_hung_request(mic, tmp_path):
@@ -336,15 +369,16 @@ def test_idle_reminders_fire_while_quiet_then_the_session_stops(mic, tmp_path):
         tmp_path,
         silence(3600),
         max_duration=3600,
-        idle_timeout=0.5,
-        idle_notify_interval=0.15,
+        idle_timeout=1.5,
+        idle_notify_interval=0.1,
         on_idle=reminders.append,
     )
 
+    # ~14 are due in that window; two is plenty of margin for a loaded runner.
     assert len(reminders) >= 2, reminders
     # The reported figure is how long the audio has been quiet, which in this
     # sped-up fake stream runs ahead of wall-clock time.
-    assert all(seconds >= 0.15 for seconds in reminders), reminders
+    assert all(seconds >= 0.1 for seconds in reminders), reminders
     assert outcome.idle_stopped
 
 

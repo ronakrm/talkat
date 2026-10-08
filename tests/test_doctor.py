@@ -116,3 +116,35 @@ def test_check_service_flags_dead_server(monkeypatch: pytest.MonkeyPatch, capsys
     doctor_mod._check_service(report)
     assert report.failed
     assert "not responding" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# _check_desktop_tools — modifier guard line
+# ---------------------------------------------------------------------------
+
+
+class _FakeModifierWatch:
+    def __init__(self, keyboard_count: int) -> None:
+        self.keyboard_count = keyboard_count
+
+    def __enter__(self) -> _FakeModifierWatch:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize(("keyboards", "mark"), [(2, doctor_mod.OK), (0, doctor_mod.WARN)])
+def test_desktop_check_reports_modifier_guard(
+    monkeypatch: pytest.MonkeyPatch, capsys, keyboards: int, mark: str
+):
+    monkeypatch.setattr(doctor_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(doctor_mod, "compositor_name", lambda: None)
+    monkeypatch.setattr(doctor_mod, "ModifierWatch", lambda: _FakeModifierWatch(keyboards))
+
+    report = doctor_mod._Report()
+    doctor_mod._check_desktop_tools(report)
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "modifier guard" in ln]
+    assert len(lines) == 1
+    assert lines[0].startswith(f" {mark} modifier guard")

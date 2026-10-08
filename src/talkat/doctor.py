@@ -21,6 +21,7 @@ import httpx
 
 from .config import CODE_DEFAULTS, load_app_config
 from .focus import compositor_name
+from .keyboard import ModifierWatch
 from .paths import CONFIG_FILE, RUNTIME_DIR, SYSTEM_CONFIG_FILE
 
 OK = "✓"
@@ -215,6 +216,18 @@ def _check_desktop_tools(report: _Report) -> None:
         report.line(OK, "focus guard", f"active ({compositor})")
     else:
         report.line(WARN, "focus guard", "inactive (no supported compositor IPC detected)")
+
+    with ModifierWatch() as modifiers:
+        keyboards = modifiers.keyboard_count
+    if keyboards:
+        report.line(OK, "modifier guard", f"active (watching {keyboards} keyboard device(s))")
+    else:
+        report.line(
+            WARN,
+            "modifier guard",
+            "inactive (can't read /dev/input — typing won't pause while Super/Ctrl/Alt "
+            "is held; add your user to the 'input' group)",
+        )
 
 
 def _check_audio(report: _Report) -> None:

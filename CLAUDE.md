@@ -19,13 +19,13 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    Audio Input                      Speech Models
    (pyaudio)                    (Faster-Whisper/Vosk)
        │
-   VAD + Stream
-   (record.py)
+   Dictation session ── pause-cut segments, one request each
+   (session.py, segmenter.py)
        │
-   Text Output
+   Text Output, typed as you talk
    (ydotool)
        │
-   Toggle Control
+   Toggle Control — one route: `talkat listen` on, again off
    (PID tracking)
 ```
 
@@ -38,18 +38,39 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - Provides streaming + file transcription endpoints
    - Supports Faster-Whisper (default) and Vosk models
 
-2. **Client** (`main.py`)
-   - Captures audio from microphone and streams it to the server
-   - Types recognized text via ydotool (Wayland), with a focus guard and
-     clipboard fallback — the transcript is never silently lost
+2. **Client** (`main.py`, `session.py`, `segmenter.py`, `client.py`)
+   - **One dictation route**: `run_dictation` behind `talkat listen`, toggled
+     on and off by the same command. There is no separate long mode — a
+     30-minute session is just a long recording (`--to-file` switches the
+     output to a transcript file + clipboard instead of typing)
+   - `DictationSession` keeps the mic open for the whole recording, cuts the
+     stream into segments at natural pauses (`Segmenter`: first ≥0.4 s pause
+     after 3 s, else the quietest moment before 30 s), and a background
+     thread transcribes them in order — each POST carries the previous
+     segment's text as `prompt` for continuity
+   - Types each segment as soon as it's transcribed (typed as you talk);
+     AIPP, `-o`, `--to-file`, and `output_mode: clipboard` deliver once at
+     the end (`--to-file` appends as it goes and clipboards at the end)
+   - Silence never ends a recording: `idle_timeout` (60 s without transcribed
+     speech) stops it, `idle_notify_interval` (30 s) reminds the user it's
+     still going, `max_recording_duration` (10 min) is the ceiling
+   - A segment that still fails after retries is saved as a WAV under
+     `~/.local/share/talkat/untranscribed/`; a `[untranscribed audio: talkat
+     file <path>]` marker takes its place, and listen puts everything from
+     that point on the clipboard
+   - Types via ydotool (Wayland), with focus + modifier guards and clipboard
+     fallback — the transcript is never silently lost
    - **Toggle support**: PID file tracking for start/stop with same command
    - Graceful interruption handling via signals
 
 3. **Audio capture** (`record.py`, `devices.py`)
-   - `AudioSession` streams **every** chunk from the moment the mic opens;
-     the calibrated threshold only decides when the utterance is over
-     (silence auto-stop). Client-side gating of what gets *sent* is exactly
-     how utterance beginnings used to get clipped — don't reintroduce it.
+   - `AudioSession` is capture and nothing else: it streams **every** chunk
+     from the moment the mic opens and ends only on `stop_event`,
+     `max_duration`, or a read error (`stop_reason` says which). Deciding
+     what counts as speech belongs to the segmenter (where to cut) and the
+     server-side VAD filter (what to trim) — client-side gating of what gets
+     *sent* is exactly how utterance beginnings used to get clipped, and
+     segments always concatenate back to the captured bytes.
    - Device index is resolved on the same PyAudio instance that opens the
      stream (PortAudio snapshots topology per instance; PipeWire churns
      indices), with one retry on a fresh instance.
@@ -79,10 +100,24 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - `listen` captures the window at recording start and refuses to type if
      focus changed — transcript goes to the clipboard instead
    - All failure paths return `None` = "guard off", never "focus changed"
+   - Re-checked at every word while typing; whatever isn't typed yet goes to
+     the clipboard
 
-7. **Environment self-check** (`doctor.py`)
+7. **Modifier guard** (`keyboard.py`)
+   - ydotoold's virtual keyboard shares the seat's modifier state: with
+     Super physically held, typed letters become compositor shortcuts
+     (observed on niri: Space → launcher, T → terminal, H/L → focus)
+   - `listen` types **one keystroke per `ydotool` call** and reads held keys
+     from evdev (`EVIOCGKEY`) before each one, pausing while a modifier is
+     down (5 s, then the rest goes to the clipboard)
+   - Needs read access to `/dev/input` (`input` group); unreadable = guard off
+   - Keyboard fds are opened once per typing run: an evdev close costs
+     5–13 ms, a key-state read ~2 µs
+
+8. **Environment self-check** (`doctor.py`)
    - `talkat doctor`: install origin, PATH/systemd shadowing, server health
-     + version skew, audio devices, ydotoold/clipboard/notification tooling
+     + version skew, audio devices, ydotoold/clipboard/notification tooling,
+     focus/modifier guard status
    - First thing to run when behavior looks stale or inconsistent
 
 ## Development Workflow
@@ -123,7 +158,7 @@ uv sync
 
 ### Automated tests
 ```bash
-uv run pytest                 # full suite (~430 tests, no mic/model needed)
+uv run pytest                 # full suite (~470 tests, no mic/model needed)
 uv run pytest tests/test_vad.py -q
 uv run mypy src/talkat/       # strict typing is enforced in CI
 uvx ruff@0.1.14 format --check . && uvx ruff@0.1.14 check .  # CI-pinned ruff
@@ -132,10 +167,9 @@ uvx ruff@0.1.14 format --check . && uvx ruff@0.1.14 check .  # CI-pinned ruff
 ### Manual testing workflow
 ```bash
 # All through dev.sh so the installed service is untouched:
-./dev.sh listen       # toggle: run again to stop
-./dev.sh long
+./dev.sh listen              # toggle: run again to stop
+./dev.sh listen --to-file    # transcript file + clipboard, no typing
 ./dev.sh calibrate
-./dev.sh start-long; ./dev.sh stop-long; ./dev.sh toggle-long
 ```
 
 ### Installation
@@ -228,17 +262,22 @@ finally:
 ### Audio Processing Patterns
 ```python
 # AudioSession owns the PyAudio lifecycle; iterate it for chunks.
-with AudioSession(threshold=200.0) as session:
+with AudioSession(max_duration=600.0) as session:
     for chunk in session:      # every chunk from mic-open onward
         send(chunk)
-# Iteration ends on: post-speech silence > silence_duration,
-# max_duration reached, or stop_event set.
+# Iteration ends on: max_duration reached or stop_event set.
 ```
 
-Key invariant: the threshold decides when to STOP, never what to SEND.
-Anything that drops audio client-side before the server sees it will clip
-utterance beginnings for quiet speakers — the server-side VAD filter is the
-component responsible for trimming silence.
+Key invariant: the calibrated threshold decides where to CUT, never what to
+SEND, and nothing about capture depends on it. Anything that drops audio
+client-side before the server sees it will clip utterance beginnings for
+quiet speakers — the server-side VAD filter is the component responsible for
+trimming silence.
+
+Live dictation runs through `DictationSession` (session.py), which owns an
+`AudioSession` on a capture thread, a `Segmenter`, and a transcription
+thread; `run(on_result)` delivers `SegmentResult`s in order on the caller's
+thread.
 
 ## File Structure
 ```
@@ -247,9 +286,13 @@ talkat/
 │   ├── __init__.py       # Package marker
 │   ├── cli.py            # CLI entry point and command routing
 │   ├── main.py           # Client orchestration (listen/long, delivery)
+│   ├── session.py        # DictationSession: open mic, segments, ordered ASR
+│   ├── segmenter.py      # Where live audio is cut (pauses / 30 s cap)
+│   ├── client.py         # TranscriptionClient for /transcribe_stream
 │   ├── record.py         # AudioSession (capture + silence auto-stop), calibration
 │   ├── devices.py        # Audio device discovery/pinning
 │   ├── focus.py          # Focused-window queries (niri/Hyprland/sway IPC)
+│   ├── keyboard.py       # Modifier guard: held keys via evdev EVIOCGKEY
 │   ├── model_server.py   # Flask + waitress server over unix socket
 │   ├── backends.py       # TranscriptionBackend Protocol + faster-whisper/Vosk
 │   ├── audio_utils.py    # Gain normalization, long-form segmentation
@@ -258,14 +301,14 @@ talkat/
 │   ├── postprocess.py    # AIPP: LLM cleanup via OpenAI-compatible endpoint
 │   ├── config.py         # Layered config load/save (save prunes defaults)
 │   ├── paths.py          # XDG paths + TALKAT_RUNTIME_DIR override
-│   ├── process_manager.py# flock-based locks, PID files, background procs
+│   ├── process_manager.py# flock-based lock, PID file, stopping a session
 │   ├── security.py       # Input validation, safe subprocess wrapper
 │   ├── clipboard.py      # wl-copy → xclip fallback
 │   ├── diagnostics.py    # Per-run diagnostics JSON (+retention)
 │   ├── doctor.py         # talkat doctor environment self-check
 │   ├── logging_config.py # Logging setup (console + rotating file)
 │   └── service.py        # install/uninstall the user systemd unit
-├── tests/                # pytest suite (~430 tests; no mic/model needed)
+├── tests/                # pytest suite (~470 tests; no mic/model needed)
 ├── dev.sh                # Run the checkout against an isolated runtime dir
 ├── setup.sh              # uv-tool install (non-Arch systems)
 ├── talkat.service        # Unit shipped by the Arch package
@@ -288,18 +331,23 @@ talkat/
 3. Add configuration option in `config.py` (+ validation in `security.py`)
 4. Add model download logic
 
-### Changing capture / silence-stop behavior
-1. Modify `AudioSession.__iter__` in `record.py`
-2. Preserve the invariant: threshold decides when to stop, never what to send
-3. Update `tests/test_vad.py`; test with quiet speakers and noisy rooms
+### Changing capture / silence-stop / segmentation behavior
+1. Modify `AudioSession.__iter__` in `record.py`, or the cut policy in
+   `segmenter.py` (its constants were tuned on real speech — re-measure)
+2. Preserve the invariant: threshold decides when to stop and where to cut,
+   never what to send
+3. Update `tests/test_vad.py` / `tests/test_segmenter.py`; test with quiet
+   speakers and noisy rooms
 
 ## Testing Checklist
 
 ### Automated tests
 
-`uv run pytest` covers config, security, VAD/AudioSession, listen/long
-modes, focus guard, doctor, process manager, file processor, CLI dispatch,
-AIPP, and integration paths over a real Flask+waitress UDS server. CI runs
+`uv run pytest` covers config, security, capture, segmentation, the
+dictation session (threads, retries, saved audio), delivery (typing guards,
+clipboard fallbacks, `--to-file`), focus guard, doctor, process manager,
+file processor, CLI dispatch, AIPP, and integration paths over a real
+Flask+waitress UDS server. CI runs
 the suite on Python 3.11–3.14 plus ruff (pinned 0.1.14) and strict mypy.
 
 ### Manual verification (audio hardware paths)
@@ -314,11 +362,9 @@ Things the suite can't cover — worth a manual pass before a release:
    - [ ] Toggle functionality works (second call stops recording)
 
 2. **Modes**
-   - [ ] Listen mode (single utterance)
-   - [ ] Listen mode toggle (start/stop with same command)
-   - [ ] Long mode (continuous)
-   - [ ] Background long mode (start-long/stop-long)
-   - [ ] Toggle-long mode
+   - [ ] Toggle on, dictate, toggle off — text typed as you talk
+   - [ ] A long session (minutes) with pauses: reminders fire, nothing lost
+   - [ ] `--to-file`: appends as it goes, clipboard at the end, types nothing
    - [ ] Calibration mode
 
 3. **Edge Cases**
@@ -382,11 +428,12 @@ cross-check is the headline deferred design).
 1. ~~Add toggle functionality for listen mode~~ ✅
 2. ~~Comprehensive type hints~~ ✅ (mypy strict in CI)
 3. ~~Proper logging framework~~ ✅ (`logging_config.py`, rotating file log)
-4. ~~Automated tests~~ ✅ (~430 tests + CI)
+4. ~~Automated tests~~ ✅ (~470 tests + CI)
 5. ~~Support audio file input (.wav, .mp3)~~ ✅
 6. ~~Never lose a transcript on delivery failure~~ ✅ (clipboard fallback)
-7. Keep the mic open across utterances in long mode (today it reopens per
-   utterance; speech during the reopen gap is lost)
+7. ~~Keep the mic open across utterances in long mode~~ ✅ (`DictationSession`)
+8. ~~Merge `toggle-long` into `listen`~~ ✅ (one route; `long`, `start-long`,
+   `stop-long`, `toggle-long` removed)
 
 ### Medium Priority
 1. Multi-engine ASR cross-check (see docs/future-work.md sketch)
@@ -433,23 +480,34 @@ Resolved former known-bugs (kept here so they aren't re-reported):
   `AudioSessionError` with a notification
 - ~~Cut-off utterance beginnings~~ → stream-from-open (threshold only stops)
 - ~~Transcript lost when typing fails~~ → clipboard/stdout fallback chain
+- ~~`listen` cut off at 30 s~~ → `max_recording_duration` default 600 s
+  (safety net only) + a notification whenever a recording ends on its own
+- ~~Typed text triggered compositor shortcuts / moved windows~~ → modifier
+  guard (per-keystroke typing, evdev key state)
+- ~~Long mode lost speech between utterances~~ (mic closed during each ASR
+  wait) → `DictationSession` keeps the mic open for the whole recording
+- ~~Two dictation routes with different bugs~~ → one route (`run_dictation`);
+  `long`/`start-long`/`stop-long`/`toggle-long` are gone, and with them the
+  background-spawn machinery and `ProcessManager.toggle`
 
 Still true / watch out for:
-1. **Signal handling is subtle** — the FIRST SIGINT/SIGTERM only sets the
-   stop event: the capture loop notices within one ~32 ms chunk, the
-   streaming request completes, and the transcript is delivered. A SECOND
-   signal raises `KeyboardInterrupt` to force-abort a blocked wait (hung
-   server — PEP 475 would otherwise swallow the signal until
-   `http_timeout`). Raising on the *first* signal was the v1.0.0 bug that
-   made every toggle-stop log "Recording interrupted." and lose the
-   transcript. `tests/test_toggle_signal.py` pins this with real signals;
+1. **Signal handling is subtle** — handlers never raise; they only set
+   events. The FIRST SIGINT/SIGTERM sets `stop_event`: capture ends within
+   one ~30 ms chunk and everything recorded is still transcribed and
+   delivered. Raising on the first signal was the v1.0.0 bug that made every
+   toggle-stop lose the transcript. The SECOND sets `abort_event` — typing
+   stops between keystrokes, no new requests start, untranscribed audio is
+   saved — within the 1 s before `stop_process`'s SIGKILL. (The hotkey can't
+   send a second signal: the stopping invocation holds the lock while it
+   waits.) Raising `KeyboardInterrupt` used to be the escape from a hung
+   server wait; nothing blocks the main thread on the server anymore, and a
+   raise inside `subprocess.run` SIGKILLs ydotool mid-keystroke, leaving the
+   key held down. `tests/test_toggle_signal.py` pins this with real signals;
    still re-test toggle on real hardware when touching it.
-2. **Long mode reopens the mic between utterances** — speech during that
-   ~0.3 s gap is lost (tracked in Future Improvements).
-3. **ALSA/JACK init noise** is fd-level suppressed
+2. **ALSA/JACK init noise** is fd-level suppressed
    (`_suppress_native_stderr`), so genuine PortAudio warnings are also
    hidden inside that block.
-4. **Memory** — unverified suspicion of slow growth in a long-running
+3. **Memory** — unverified suspicion of slow growth in a long-running
    server with certain models; no reproduction yet.
 
 ### Common Issues
@@ -473,6 +531,8 @@ Still true / watch out for:
    - Check: ydotoold is running (`talkat doctor` shows the socket)
    - If focus moved mid-dictation the focus guard diverts to the clipboard
      by design (`focus_guard: false` disables)
+   - Typing pauses while any Ctrl/Shift/Alt/Super key is held and gives the
+     rest to the clipboard after 5 s — check for a stuck key
    - Test: `ydotool type "test"`
 
 4. **"Toggle not working"**

@@ -9,10 +9,13 @@ A voice command system with local model server for privacy and offline use. Talk
 
 ## Status
 
-Stable as of `v1.0.0`. The CLI, on-disk layout, and wire protocol are
-considered stable surface; breaking changes go through a deprecation cycle.
+Stable. `v2.0.0` replaced the five dictation commands with one —
+`talkat listen` toggles dictation on and off; see the
+[changelog](CHANGELOG.md) for the migration. The CLI, on-disk layout, and
+wire protocol are stable surface; breaking changes come with a major
+version.
 CI runs tests + lint + type-check on every push, the codebase is mypy-strict,
-and the runtime surface is covered by ~370 automated tests. Issues and PRs
+and the runtime surface is covered by ~470 automated tests. Issues and PRs
 welcome — see [CHANGELOG.md](CHANGELOG.md) for what's in each release.
 
 ## System Requirements
@@ -131,7 +134,7 @@ Log out + back in after changing groups.
 
 1. Run `talkat doctor` — it checks the service, socket, audio devices,
    ydotool/clipboard tooling, and flags stale or shadowed installs.
-2. **Calibrate your microphone** (required for silence detection):
+2. **Calibrate your microphone** (it's how pauses are found):
    `talkat calibrate` (stay silent for 10 seconds)
 3. Try `talkat listen` — focus a text editor and speak.
 
@@ -170,65 +173,76 @@ The model server runs automatically in the background after installation.
 talkat calibrate
 ```
 
-Calibration measures ambient noise and saves an appropriate silence
-threshold to `~/.config/talkat/config.json`. Without it, voice activity
-detection may not fire on your voice (threshold too high) or may trigger
-on background noise (threshold too low). Recalibrate when you switch
-microphones, change rooms, or detection stops working reliably.
+Calibration measures ambient noise and saves a speech threshold to
+`~/.config/talkat/config.json`. That threshold is what tells talkat where
+your pauses are, which is where it cuts a recording into pieces to
+transcribe. Set too high, it hears no pauses and falls back to cutting every
+30 s (text arrives in bigger, later batches); set too low, it cuts on room
+noise. Recalibrate when you switch microphones or change rooms.
 
-### Short Dictation Mode (with Toggle)
-Start or stop listening for voice commands:
+### Dictation — one command, one hotkey
+
 ```bash
 talkat listen  # First call: starts recording
-talkat listen  # Second call: stops recording and transcribes
+talkat listen  # Second call: stops recording
 ```
 
-**Toggle Feature**: Running `talkat listen` while already recording will stop the current recording and process the transcription. This makes it perfect for keyboard shortcuts - press once to start, press again to stop.
+`talkat listen` is the whole interface: run it to start, run it again to
+stop. Bind it to one key and press that key twice around whatever you want
+to say — short prompt or half an hour of notes, it's the same command.
 
-The transcribed text is automatically typed to the current application and saved to a transcript file.
+The text is typed as you talk: the recording is cut at natural pauses and
+each piece is transcribed in the background and typed as soon as it's ready,
+so a sentence usually appears a second or two after you finish saying it.
+The whole transcript is also saved to a transcript file. (With
+`--postprocess`, `-o`, or `output_mode: clipboard`, the transcript is
+delivered once, when the recording ends.)
 
-### Long Dictation Mode
-Continuous dictation that saves to file without typing to screen:
+If part of the recording can't be transcribed — the model server is down or
+keeps failing — that audio is saved under
+`~/.local/share/talkat/untranscribed/`, typing stops, and the rest of the
+transcript goes to the clipboard with a marker such as
+`[untranscribed audio: talkat file ~/.local/share/talkat/untranscribed/20260916_110407_003.wav]`
+in place of the missing part; run that command to transcribe it later.
+
+Silence doesn't stop a recording — a pause to think is just a pause. It
+ends when you toggle it off, or on its own after `idle_timeout` with no
+speech (default 60 s) or at `max_recording_duration` (default 10 minutes, a
+safety net for a mic left open). While it's quiet you get a reminder every
+`idle_notify_interval` (default 30 s) that it's still recording, and a
+notification whenever it stops by itself.
+
+### Long-Form Notes (`--to-file`)
+
+Same command, different output: nothing is typed, each piece is appended to
+a transcript file as it's recognized, and the whole transcript goes to the
+clipboard when you stop.
+
 ```bash
-talkat long              # Saves to file and copies to clipboard on exit
-talkat long --no-clipboard   # Saves to file only
+talkat listen --to-file                  # ~/.local/share/talkat/transcripts/<time>_dictation.txt
+talkat listen --to-file -o notes.txt     # into a file you choose
 ```
 
-Long dictation mode:
-- Saves transcript to `~/.local/share/talkat/transcripts/` incrementally as utterances are recognized
-- Automatically copies the full transcript to clipboard on exit (unless `--no-clipboard`)
-- **Auto-stops** after `long_mode_silence_timeout` seconds of continuous silence (default 60s) so it cleans up by itself if you walk away
-- Hard cap on a single session: `long_mode_max_session_duration` (default 30 minutes)
-- You can still stop manually with Ctrl+C (foreground) or `talkat toggle-long` (background)
-
-### Background Long Dictation
-Manage long dictation as a background process:
-```bash
-talkat start-long    # Start long dictation in background
-talkat stop-long     # Stop background long dictation
-talkat toggle-long   # Toggle: start if stopped, stop if running
-```
+It's the same toggle: run `talkat listen` again to stop. Raise
+`idle_timeout` (or `max_recording_duration`) in your config for sessions
+that include long silences.
 
 ### Create Shortcuts
 
-Bind commands to keyboard shortcuts. For Niri:
+One binding is all it takes — the same key starts and stops. For Niri:
 
 ```kdl
-# Single key for toggle recording (press to start, press again to stop)
-Mod+Apostrophe { spawn "bash" "-c" "talkat listen"; }
+Mod+Apostrophe repeat=false { spawn "talkat" "listen"; }
 
-# Long dictation mode
-Mod+Shift+Apostrophe { spawn "bash" "-c" "talkat long"; }
-
-# Toggle background long dictation
-Mod+Ctrl+Apostrophe { spawn "bash" "-c" "talkat toggle-long"; }
+# Optional second binding for long-form notes (file + clipboard, no typing)
+Mod+Shift+Apostrophe repeat=false { spawn "talkat" "listen" "--to-file"; }
 ```
 
 For Sway:
 
 ```sh
-bindsym $mod+apostrophe exec bash -c "talkat listen"
-bindsym $mod+Shift+apostrophe exec bash -c "talkat long"
+bindsym $mod+apostrophe exec talkat listen
+bindsym $mod+Shift+apostrophe exec talkat listen --to-file
 ```
 
 ## Configuration
@@ -248,9 +262,9 @@ Example configuration:
     "model_name": "small.en",
     "language": "en",
     "save_transcripts": true,
-    "clipboard_on_long": true,
-    "long_mode_silence_timeout": 60.0,
-    "long_mode_max_session_duration": 1800.0,
+    "idle_timeout": 60.0,
+    "idle_notify_interval": 30.0,
+    "max_recording_duration": 600.0,
     "transcript_dir": "~/.local/share/talkat/transcripts"
 }
 ```
@@ -261,8 +275,7 @@ Talkat uses Whisper's language hint to pick the decoder for a given utterance.
 Set it in the config file or override per-invocation with `--language`:
 
 ```bash
-talkat listen --language es           # transcribe a Spanish utterance
-talkat long --language fr             # long-mode dictation in French
+talkat listen --language es           # dictate in Spanish
 talkat file input.wav --language de   # transcribe a German audio file
 ```
 
@@ -283,6 +296,17 @@ compositors it silently disables itself (always types).
   always copy transcripts to the clipboard.
 - If typing fails for any reason (ydotoold not running, ydotool missing),
   the transcript falls back to the clipboard rather than being lost.
+
+**Modifier guard.** Keys typed through ydotool combine with keys you're
+physically holding: hold Super while a transcript is being typed and each
+letter becomes a Super+letter shortcut in your compositor. So talkat types
+one keystroke at a time and, before each, checks that no Ctrl/Shift/Alt/Super
+key is held — typing pauses until you let go. Focus is re-checked at every
+word too. If typing can't continue (focus moved, a key stays held for 5 s,
+you press stop again), the rest of the transcript goes to the clipboard.
+The guard reads key state from `/dev/input`, so it needs the `input` group
+(the one-time ydotool setup above already adds you); `talkat doctor` shows
+whether it's active.
 
 ### Input device
 
@@ -373,7 +397,7 @@ and OpenAI itself.
 Then:
 ```bash
 talkat listen --postprocess tidy
-talkat long --postprocess tidy        # applied once to the full session at end
+talkat listen --to-file --postprocess tidy   # applied once to the whole transcript
 talkat file recording.wav --postprocess tidy
 talkat batch *.wav -o out/ --postprocess tidy
 ```

@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-08
+
+Typing is about five times faster, with the pace now configurable, and
+`config.json` is harder to break: one bad value no longer costs you the
+whole file, and `talkat calibrate` / `talkat model use` can no longer wipe
+it. Nothing to migrate, but restart the service after upgrading
+(`systemctl --user restart talkat`) and run `talkat doctor`: it now lists
+any setting in your config that talkat ignores, and why. A few values 2.0
+let through, like quoted numbers and relative paths, are refused now.
+
+### Added
+- **`typing_key_hold_ms`** (default 5, 0–100) and **`typing_key_delay_ms`**
+  (default 0, 0–100) set the typing pace. If an app drops or doubles
+  characters, raise the hold (2.0 held each key 20 ms) or add a few ms of
+  delay between keys.
+- **`talkat doctor`** lists the config files it read and every setting in
+  them that's ignored, with the reason and the value used instead.
+- `CONTRIBUTING.md` for working on talkat: isolated runs with `./dev.sh`,
+  the checks CI runs, and the live AIPP tests.
+
+### Changed
+- **Typing ~5× faster** — ~32 ms → ~7 ms per character. Each keystroke is
+  held 5 ms instead of ydotool's default 20, and talkat no longer polls for
+  each ydotool call to finish. Still one keystroke per call, so the focus
+  and modifier guards work exactly as before.
+- **Each setting is validated on its own.** An invalid value falls back to
+  the `/etc/talkat/config.json` value or the built-in default, and the rest
+  of the file still applies; only a file that can't be parsed as a JSON
+  object is skipped whole. Unknown keys are reported, with a did-you-mean
+  for typos, and removed keys name their replacement.
+- **Stricter values**: numbers must be JSON numbers (`"60"` and `true` are
+  refused), whole-number settings reject fractions, `max_upload_size_mb` is
+  limited to 1–2048, and path settings must be absolute or start with `~`
+  (a relative path used to resolve against each process's working
+  directory).
+- **`talkat calibrate` and `talkat model use`** change only their own key
+  in `~/.config/talkat/config.json`, and refuse to rewrite a file they
+  can't parse — calibrate then prints the threshold to set by hand.
+- README rewritten around installing and using talkat, with a reference
+  for every setting.
+
+### Fixed
+- A path setting that was a symlink or contained `..` (say, a model cache
+  symlinked onto a bigger disk) crashed every command. Both are accepted
+  now.
+- `talkat calibrate` and `talkat model use` rewrote the whole user config:
+  they copied `/etc` values into it and, if the file had been rejected as
+  invalid, dropped everything else in it.
+
+### Removed
+- Dead config keys `device`, `model_cache_dir` and `pre_speech_padding`;
+  nothing read them. A file that still sets one gets a warning, naming the
+  replacement where there is one.
+
 ## [2.0.0] - 2026-10-08
 
 Dictation is now **one route with one hotkey**: `talkat listen` toggles it on

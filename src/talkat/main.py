@@ -4,9 +4,11 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import threading
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import FrameType
@@ -216,7 +218,9 @@ def run_dictation(
 
     # Type each piece the moment it's transcribed, unless the transcript has
     # to be whole first (AIPP rewrites all of it).
-    typist = _Typist(focus_before, abort_event) if types_text and not postprocess else None
+    typist: _Typist | None = None
+    if types_text and not postprocess:
+        typist = _Typist(focus_before, abort_event, _TypingPace.from_config(config))
 
     transcript_file: _TranscriptFile | None = None
     if to_file:
@@ -445,9 +449,25 @@ def _deliver_text(
             _notify(f"Recognized: {text[:100]}")
         return
 
-    typist = _Typist(focus_before, abort_event or threading.Event())
+    pace = _TypingPace.from_config(config)
+    typist = _Typist(focus_before, abort_event or threading.Event(), pace)
     typist.add(text, transcribed=complete)
     typist.finish()
+
+
+@dataclass(frozen=True)
+class _TypingPace:
+    """How fast :func:`_type_text` types: ``typing_key_hold_ms`` / ``typing_key_delay_ms``."""
+
+    key_hold_ms: int
+    key_delay_ms: int
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "_TypingPace":
+        def ms(key: str) -> int:
+            return int(float(config.get(key, CODE_DEFAULTS[key])))
+
+        return cls(ms("typing_key_hold_ms"), ms("typing_key_delay_ms"))
 
 
 class _Typist:
@@ -458,9 +478,12 @@ class _Typist:
     more is typed, and :meth:`finish` puts everything untyped on the clipboard.
     """
 
-    def __init__(self, focus_before: str | None, abort_event: threading.Event) -> None:
+    def __init__(
+        self, focus_before: str | None, abort_event: threading.Event, pace: _TypingPace
+    ) -> None:
         self._focus_before = focus_before
         self._abort_event = abort_event
+        self._pace = pace
         self._typed = ""
         self._untyped = ""
         self.stop_reason: str | None = None
@@ -479,7 +502,7 @@ class _Typist:
         if self.stop_reason is not None:
             self._untyped += piece
             return
-        typed, reason = _type_text(piece, self._focus_before, self._abort_event)
+        typed, reason = _type_text(piece, self._focus_before, self._abort_event, self._pace)
         self._typed += piece[:typed]
         if reason is not None:
             self.stop_reason = reason
@@ -506,7 +529,7 @@ class _Typist:
 
 
 def _type_text(
-    text: str, focus_before: str | None, abort_event: threading.Event
+    text: str, focus_before: str | None, abort_event: threading.Event, pace: _TypingPace
 ) -> tuple[int, str | None]:
     """Type ``text`` with one ydotool call per keystroke.
 
@@ -520,13 +543,27 @@ def _type_text(
     and three terminals. Checking before each keystroke confines a badly
     timed press to the one key already in flight.
 
+    Each key is held ``pace.key_hold_ms``, and ``pace.key_delay_ms`` separates
+    consecutive keys — slept before the guard checks, so a key pressed during
+    the pause is still caught before the next keystroke.
+
     Focus is re-checked at each word boundary and after any modifier wait
     (the shortcut may have moved it). Both sides must be known to conclude
     "changed" — an IPC failure disables the guard, not typing.
     """
+    # Every call carries one key. --escape=0: typed on its own, "\" would
+    # start an escape sequence and never appear. --key-delay only separates
+    # the keys of one call, so it never applies here — pinned to 0 anyway, so
+    # a ydotool that also slept after the last key couldn't quietly add its
+    # 20 ms default to every keystroke.
+    hold = f"--key-hold={pace.key_hold_ms}"
+    command = ["ydotool", "type", hold, "--key-delay=0", "--escape=0", "--"]
     with ModifierWatch() as modifiers:
         check_focus = True
+        pressed_any = False
         for i, char in enumerate(text):
+            if pressed_any and pace.key_delay_ms and char.isascii():
+                time.sleep(pace.key_delay_ms / 1000)
             if abort_event.is_set():
                 return i, "stopped"
             if modifiers.held():
@@ -547,13 +584,15 @@ def _type_text(
                 # so any other byte reads outside the table. Never send one.
                 continue
             try:
-                # --escape=0: typed on its own, "\" would start an escape
-                # sequence and never appear.
-                safe_subprocess_run(["ydotool", "type", "--escape=0", "--", char], check=True)
+                # The piped stdout is for timing: subprocess.run's timeout then
+                # waits on the pipe closing — the moment ydotool exits — not on
+                # a poll with doubling sleeps (a 20 ms keystroke took 31 ms).
+                safe_subprocess_run([*command, char], check=True, stdout=subprocess.PIPE)
             except Exception as e:
                 # ydotool missing, ydotoold not running, a crash mid-type.
                 logger.warning(f"Typing failed: {e}")
                 return i, "typing failed (ydotool error)"
+            pressed_any = True
     return len(text), None
 
 

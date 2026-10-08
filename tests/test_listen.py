@@ -194,11 +194,16 @@ def _ydotool_calls(calls: list[list[str]]) -> list[list[str]]:
 
 def _typed_text(calls: list[list[str]]) -> str:
     """Reassemble what was typed from the per-keystroke ydotool calls."""
+    from talkat.config import CODE_DEFAULTS
+
+    # The test env has no config file, so typing runs at the default pace.
+    hold = f"--key-hold={CODE_DEFAULTS['typing_key_hold_ms']}"
+    keystroke = ["ydotool", "type", hold, "--key-delay=0", "--escape=0", "--"]
     ydotool_calls = _ydotool_calls(calls)
     for cmd in ydotool_calls:
-        assert cmd[:4] == ["ydotool", "type", "--escape=0", "--"], cmd
-        assert len(cmd) == 5 and len(cmd[4]) == 1 and cmd[4].isascii(), cmd
-    return "".join(cmd[4] for cmd in ydotool_calls)
+        assert cmd[:-1] == keystroke, cmd
+        assert len(cmd[-1]) == 1 and cmd[-1].isascii(), cmd
+    return "".join(cmd[-1] for cmd in ydotool_calls)
 
 
 # ---------------------------------------------------------------------------

@@ -445,6 +445,8 @@ def validate_json_config(config: dict[str, Any]) -> dict[str, Any]:
         "idle_timeout": (5, 86400),
         "idle_notify_interval": (5, 3600),
         "max_consecutive_errors": (1, 100),
+        "typing_key_hold_ms": (0, 100),
+        "typing_key_delay_ms": (0, 100),
         "fw_device_index": (0, 100),
         "http_timeout": (0, 3600),
         "health_check_timeout": (0, 60),

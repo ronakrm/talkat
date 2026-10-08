@@ -16,7 +16,7 @@ import httpx
 
 from .client import TranscriptionClient
 from .clipboard import copy_to_clipboard
-from .config import CODE_DEFAULTS, load_app_config, save_app_config
+from .config import CODE_DEFAULTS, ConfigFileError, load_app_config, update_user_config
 from .diagnostics import build_record, write_record
 from .focus import get_focused_window
 from .keyboard import ModifierWatch
@@ -138,9 +138,14 @@ def run_calibrate() -> int:
     logger.info("Starting microphone calibration...")
     threshold = calibrate_microphone()
 
-    config = load_app_config()
-    config["silence_threshold"] = threshold
-    save_app_config(config)
+    try:
+        update_user_config({"silence_threshold": threshold})
+    except ConfigFileError as e:
+        # The measurement is still good — say it, so it can be set by hand.
+        logger.error(f"Calibration measured {threshold:.1f}, but it wasn't saved: {e}")
+        logger.error(f'Fix the file, or set "silence_threshold": {threshold:.1f} by hand.')
+        _notify(f"Calibration threshold {threshold:.1f} not saved — config file unreadable.")
+        return 1
 
     logger.info(f"Calibration complete. Threshold set to: {threshold:.1f}")
     _notify(f"Calibration complete. Threshold: {threshold:.1f}")

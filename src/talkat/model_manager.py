@@ -197,8 +197,7 @@ def use_model(name: str) -> tuple[Path, bool]:
     size and doesn't look like an HF repo id — reuses ``_resolve_repo_id``
     so the validity rule lives in exactly one place.
     """
-    from .config import load_app_config, save_app_config
-    from .paths import CONFIG_FILE
+    from .config import load_app_config, update_user_config
     from .security import validate_model_name
 
     name = validate_model_name(name)
@@ -206,18 +205,17 @@ def use_model(name: str) -> tuple[Path, bool]:
     # error ``download`` would give; accepts ``small.en`` and ``org/repo``.
     _resolve_repo_id(name)
 
-    config = load_app_config()
-    config["model_name"] = name
-    save_app_config(config)
+    # Raises ConfigFileError (a ValueError) rather than overwrite a broken file.
+    config_file = update_user_config({"model_name": name})
 
-    installed_names = {m.name for m in list_models(config)}
+    installed_names = {m.name for m in list_models(load_app_config())}
     cached = name in installed_names
     if not cached:
         logger.warning(
             f"{name} is not yet downloaded. The model server will fetch it on next start "
             f"(or run: talkat model download {name})."
         )
-    return CONFIG_FILE, cached
+    return config_file, cached
 
 
 def known_model_names() -> list[str]:

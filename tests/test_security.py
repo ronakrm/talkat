@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from talkat.config import CODE_DEFAULTS
 from talkat.security import (
     SecurityError,
     safe_subprocess_run,
@@ -12,6 +13,7 @@ from talkat.security import (
     sanitize_text_for_typing,
     validate_audio_params,
     validate_command,
+    validate_config_path,
     validate_file_path,
     validate_json_config,
     validate_model_name,
@@ -95,6 +97,75 @@ def test_validate_http_timeout_ok():
 def test_validate_silence_threshold_out_of_range_rejected():
     with pytest.raises(ValueError):
         validate_json_config({"silence_threshold": 100000})
+
+
+@pytest.mark.parametrize("key", sorted(CODE_DEFAULTS))
+def test_every_setting_rejects_garbage(key: str):
+    """No setting may go unvalidated: loading relies on this to keep bad values out.
+
+    Adding a key to CODE_DEFAULTS without a check in validate_json_config
+    fails here.
+    """
+    with pytest.raises(ValueError):
+        validate_json_config({key: object()})
+
+
+@pytest.mark.parametrize("key", sorted(CODE_DEFAULTS))
+def test_every_setting_accepts_its_default(key: str):
+    assert validate_json_config({key: CODE_DEFAULTS[key]}) == {key: CODE_DEFAULTS[key]}
+
+
+@pytest.mark.parametrize("value", ["60", True, None, [60]])
+def test_validate_numbers_must_be_json_numbers(value: object):
+    """float() takes "60" and True; a config file shouldn't get to."""
+    with pytest.raises(ValueError, match="must be a number"):
+        validate_json_config({"http_timeout": value})
+
+
+def test_validate_whole_number_settings():
+    assert validate_json_config({"fw_device_index": 1.0}) == {"fw_device_index": 1}
+    with pytest.raises(ValueError, match="whole number"):
+        validate_json_config({"max_consecutive_errors": 2.5})
+
+
+def test_validate_durations_come_back_as_floats():
+    cfg = validate_json_config({"idle_timeout": 120, "health_check_timeout": 0.5})
+    assert cfg == {"idle_timeout": 120.0, "health_check_timeout": 0.5}
+    assert isinstance(cfg["idle_timeout"], float)
+
+
+def test_validate_range_message_names_the_bounds():
+    with pytest.raises(ValueError, match="between 0 and 10000, got 99999"):
+        validate_json_config({"silence_threshold": 99999})
+
+
+@pytest.mark.parametrize("value", [0, 4096, float("nan")])
+def test_validate_max_upload_size_range(value: float):
+    with pytest.raises(ValueError):
+        validate_json_config({"max_upload_size_mb": value})
+
+
+def test_validate_config_paths_expand_tilde(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = validate_json_config({"transcript_dir": "~/notes"})
+    assert cfg["transcript_dir"] == str(tmp_path / "notes")
+
+
+def test_validate_config_paths_allow_symlinks_and_dotdot(tmp_path):
+    """Config is the user's own input — unlike validate_file_path's callers."""
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    assert validate_config_path("transcript_dir", str(link)) == str(link)
+    assert validate_config_path("transcript_dir", "/a/../b") == "/a/../b"
+
+
+@pytest.mark.parametrize("value", ["relative/dir", "", "/tmp/a\x00b", 42])
+def test_validate_config_paths_reject_unusable_values(value: object):
+    with pytest.raises(ValueError):
+        validate_config_path("transcript_dir", value)
 
 
 # ---------------------------------------------------------------------------

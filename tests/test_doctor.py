@@ -8,6 +8,7 @@ healthy stubbed environment exits 0.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -116,6 +117,52 @@ def test_check_service_flags_dead_server(monkeypatch: pytest.MonkeyPatch, capsys
     doctor_mod._check_service(report)
     assert report.failed
     assert "not responding" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# _check_config — every ignored setting is listed
+# ---------------------------------------------------------------------------
+
+
+def _config_lines(capsys) -> list[str]:
+    return [ln for ln in capsys.readouterr().out.splitlines() if "config" in ln]
+
+
+def test_config_check_lists_ignored_settings_as_warnings(clean_config_file, capsys):
+    clean_config_file.parent.mkdir(parents=True, exist_ok=True)
+    clean_config_file.write_text(json.dumps({"silence_threshold": 99999, "idle_timout": 300}))
+
+    report = doctor_mod._Report()
+    doctor_mod._check_config(report)
+
+    lines = _config_lines(capsys)
+    assert f" {doctor_mod.OK} user config: {clean_config_file}" in lines
+    assert (
+        f" {doctor_mod.WARN} user config: silence_threshold: must be between 0 and 10000, "
+        "got 99999 — using 200.0"
+    ) in lines
+    assert any("idle_timout" in ln and "did you mean 'idle_timeout'" in ln for ln in lines)
+    assert not report.failed  # the rest of the file still applies
+
+
+def test_config_check_fails_on_an_unparseable_file(clean_config_file, capsys):
+    clean_config_file.parent.mkdir(parents=True, exist_ok=True)
+    clean_config_file.write_text("{ broken json")
+
+    report = doctor_mod._Report()
+    doctor_mod._check_config(report)
+
+    [line] = [ln for ln in _config_lines(capsys) if "user config" in ln]
+    assert line.startswith(f" {doctor_mod.BAD} user config: {clean_config_file}: can't be read")
+    assert report.failed  # nothing in that file takes effect
+
+
+def test_config_check_without_a_user_file(clean_config_file, capsys):
+    report = doctor_mod._Report()
+    doctor_mod._check_config(report)
+
+    assert any("user config: none" in ln for ln in _config_lines(capsys))
+    assert not report.failed
 
 
 # ---------------------------------------------------------------------------

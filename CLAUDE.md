@@ -338,6 +338,7 @@ talkat/
 ├── talkat.service        # Unit shipped by the Arch package
 ├── pyproject.toml        # Project configuration
 ├── CLAUDE.md             # This file
+├── CONTRIBUTING.md       # Dev workflow: dev.sh, CI checks, AIPP live tests, packaging
 └── README.md             # User documentation
 ```
 

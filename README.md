@@ -5,56 +5,58 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A voice command system with local model server for privacy and offline use. Talkat allows you to speak into any keyboard input in a Wayland-based compositor, similar to nerd-dictation but with a simpler setup.
+Talkat is voice dictation for Wayland desktops. Press a hotkey, talk, and
+your words are typed into whatever window has focus. Speech recognition runs
+locally (faster-whisper or Vosk) in a background service, so your audio never
+leaves your machine.
 
-## Status
+Press the hotkey and talkat starts recording. As you talk, it cuts the audio
+at natural pauses, transcribes each piece in the background, and types it as
+soon as it's ready. Press the hotkey again to stop: the rest is transcribed
+and typed, and the transcript is saved. The only thing that can leave your
+machine is transcript text, and only if you point
+[AI post-processing](#ai-post-processing) at a hosted LLM.
 
-Stable. `v2.0.0` replaced the five dictation commands with one —
-`talkat listen` toggles dictation on and off; see the
-[changelog](CHANGELOG.md) for the migration. The CLI, on-disk layout, and
-wire protocol are stable surface; breaking changes come with a major
-version.
-CI runs tests + lint + type-check on every push, the codebase is mypy-strict,
-and the runtime surface is covered by ~470 automated tests. Issues and PRs
-welcome — see [CHANGELOG.md](CHANGELOG.md) for what's in each release.
+Talkat runs on Linux with a Wayland compositor and Python 3.11+. On niri,
+sway and Hyprland it also checks that focus hasn't moved before typing.
 
-## System Requirements
+[Install](#install) ·
+[Quick start](#quick-start) ·
+[Usage](#usage) ·
+[Configuration](#configuration) ·
+[Troubleshooting](#troubleshooting)
 
-- Linux with Wayland compositor (Sway, Niri, etc.)
-- Python 3.11 or higher
-- Audio input device (microphone)
+## Install
 
-## Dependencies
+### Arch Linux (AUR)
 
-### System Dependencies
-- `ydotool` and `ydotoold` for Wayland input simulation
-- `uv` for Python package management
-- `notify-send` (libnotify) for desktop notifications (optional)
-- `wl-copy` (wl-clipboard) or `xclip` for clipboard support (optional)
+```bash
+yay -S talkat                                   # or: paru -S talkat
+sudo pacman -S --needed wl-clipboard libnotify  # optional: clipboard fallback, notifications
+```
 
-### Python Dependencies (installed automatically into an isolated venv)
-- `faster-whisper` (CTranslate2-backed, no torch required)
-- `vosk`
-- `numpy`
-- `pyaudio`
-- `flask` + `waitress` (model server, unix-socket-only)
-- `httpx` (client; unix-socket transport)
-- `librosa` + `soundfile` (audio file ingestion)
+The package pulls in `python`, `portaudio` and `ydotool`. Do the
+[one-time ydotool setup](#one-time-ydotool-setup), then start the model
+server:
 
-## Installation
+```bash
+systemctl --user enable --now talkat
+```
 
-Two supported paths. Talkat is a per-user tool — the model server always
-runs as your user via `systemctl --user`, regardless of how the CLI is
-installed.
+The package ships its own unit (`/usr/lib/systemd/user/talkat.service`), so
+don't run `talkat install-service` on top of it.
 
-### Path 1: Local install from a git checkout
+### Other distributions
 
-> **Already have the AUR package?** Don't run `setup.sh` on top of it — a
-> uv-tool install shadows the packaged one on PATH and in systemd, and the
-> shadowing copy silently goes stale. For hacking on a checkout use
-> `./dev.sh` instead (see [Development](#development-without-installing));
-> `talkat doctor` detects shadowed installs if you're unsure what you're
-> running.
+You need:
+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- ydotool 1.0 or newer, including the `ydotoold` daemon
+- PortAudio headers and a C compiler, because PyAudio builds from source:
+  - Debian/Ubuntu: `sudo apt install portaudio19-dev build-essential python3-dev`
+  - Fedora: `sudo dnf install portaudio-devel gcc python3-devel`
+- Optional: `wl-clipboard` (or `xclip`) for the clipboard fallback, and
+  `libnotify` (`notify-send`) for status notifications
 
 ```bash
 git clone https://github.com/ronakrm/talkat.git
@@ -62,318 +64,396 @@ cd talkat
 ./setup.sh
 ```
 
-What this does:
-- `uv tool install --reinstall .` — installs the `talkat` CLI into an isolated
-  venv at `~/.local/share/uv/tools/talkat/` and drops a wrapper at
-  `~/.local/bin/talkat`
-- `talkat install-service` — writes `~/.config/systemd/user/talkat.service`
-  pointing at that interpreter, then `daemon-reload`/`enable`/`start`s it
+`setup.sh` installs the `talkat` command into an isolated environment with
+`uv tool install`, so it lands in `~/.local/bin`. It then runs
+`talkat install-service`, which writes `~/.config/systemd/user/talkat.service`
+and enables and starts it. Run it as your normal user, not root. Use one
+install method per machine: if the AUR package is already installed,
+`setup.sh` warns you and asks before shadowing it.
 
-To update after pulling: just re-run `./setup.sh`.
+### One-time ydotool setup
 
-To uninstall:
-```bash
-talkat uninstall-service
-uv tool uninstall talkat
-```
-
-### Path 2: AUR package (Arch Linux)
-
-Talkat is published on the AUR as
-[`talkat`](https://aur.archlinux.org/packages/talkat). Install with your
-preferred AUR helper:
+Talkat types through ydotool. Its daemon, `ydotoold`, needs write access to
+`/dev/uinput`, and talkat's [modifier guard](#safeguards) reads key state
+from `/dev/input`. The `input` group gives both:
 
 ```bash
-yay -S talkat       # or: paru -S talkat
-systemctl --user enable --now talkat
-```
-
-The AUR package ships its own `/usr/lib/systemd/user/talkat.service`, so do
-*not* run `talkat install-service` on top — just enable the unit directly.
-
-To uninstall: `sudo pacman -R talkat`.
-
-The PKGBUILD itself lives in the AUR git repo
-(`ssh://aur@aur.archlinux.org/talkat.git`), not in this source tree — that's
-the standard Arch packaging convention.
-
-### Packaging — help wanted
-
-Talkat currently ships only via the AUR (Arch) and `setup.sh` (any distro
-with `uv`). Native `.deb` (Debian / Ubuntu) and `.rpm` (Fedora / openSUSE)
-packages aren't in scope for v1.0.0 but would be very welcome contributions.
-
-If you're a Debian / Ubuntu / Fedora packager and want to help, please open
-an issue tagged
-[`packaging`](https://github.com/ronakrm/talkat/issues?q=is%3Aissue+label%3Apackaging)
-or file a new one. The bundled-venv-via-uv approach used by the AUR PKGBUILD
-generalizes reasonably; the open questions are runtime model (system Python +
-deb-packaged deps vs. vendored venv), repo hosting (GitHub releases vs. PPA
-vs. Copr vs. OBS), and signing.
-
-### One-time system setup for ydotool
-
-Regardless of install path you need ydotool wired up:
-
-```bash
-# Add your user to the input group
-sudo usermod -aG input $USER
-
-# udev rule for uinput access
+sudo usermod -aG input "$USER"
 echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
     | sudo tee /etc/udev/rules.d/80-uinput.rules > /dev/null
-
-# Start ydotoold from your compositor:
-# - Sway:  exec --no-startup-id ydotoold
-# - Niri:  spawn-at-startup "ydotoold"
 ```
 
-Log out + back in after changing groups.
+Reboot so the group change and the udev rule both take effect. Then keep
+`ydotoold` running, either way works:
 
-### After install
+- Arch's ydotool package ships a user service:
+  `systemctl --user enable --now ydotool`
+- Or start it from your compositor: niri `spawn-at-startup "ydotoold"`,
+  sway `exec ydotoold`, Hyprland `exec-once = ydotoold`
 
-1. Run `talkat doctor` — it checks the service, socket, audio devices,
-   ydotool/clipboard tooling, and flags stale or shadowed installs.
-2. **Calibrate your microphone** (it's how pauses are found):
-   `talkat calibrate` (stay silent for 10 seconds)
-3. Try `talkat listen` — focus a text editor and speak.
+### Upgrade and uninstall
 
-### Development without installing
+|           | AUR                                                                 | setup.sh                                                    |
+|-----------|---------------------------------------------------------------------|-------------------------------------------------------------|
+| Upgrade   | `yay -Syu talkat`, then `systemctl --user restart talkat`           | `git pull && ./setup.sh` (it restarts the service)          |
+| Uninstall | `systemctl --user disable --now talkat`, then `sudo pacman -R talkat` | `talkat uninstall-service`, then `uv tool uninstall talkat` |
 
-For iterating on the code without touching your installed talkat:
+After an upgrade, `talkat doctor` should report the same version for the
+command and the server. Uninstalling leaves your settings, models and
+transcripts in `~/.config/talkat`, `~/.cache/talkat` and
+`~/.local/share/talkat`; delete those to remove everything.
 
-```bash
-uv sync           # set up the project venv
-./dev.sh server   # foreground model server on an isolated dev socket
+## Quick start
 
-# in another terminal:
-./dev.sh calibrate
-./dev.sh listen
-./dev.sh doctor   # environment report as the dev build sees it
-```
+1. **Calibrate.** Stay quiet for 10 seconds while it runs:
 
-`dev.sh` is `uv run talkat` plus a `TALKAT_RUNTIME_DIR` override that moves
-the unix socket, PID files, and locks to `$XDG_RUNTIME_DIR/talkat-dev/`. A
-dev server/client pair therefore never collides with the installed service —
-your desktop hotkeys keep dictating through the stable install while you
-test the checkout. Config, models, and transcripts are shared.
+   ```bash
+   talkat calibrate
+   ```
 
-To point a dev client at the *installed* server instead, run
-`uv run talkat listen` directly (no isolation).
+   This measures your room's noise and saves a speech threshold to
+   `~/.config/talkat/config.json`. Talkat uses the threshold to find the
+   pauses where it cuts your dictation. Run it again when you change
+   microphones or rooms.
+
+2. **Bind a hotkey** to `talkat listen`. The same key starts and stops
+   recording, so make sure holding it down doesn't repeat the command.
+
+   niri (inside your `binds { }` block):
+
+   ```kdl
+   Mod+Apostrophe repeat=false { spawn "talkat" "listen"; }
+   Mod+Shift+Apostrophe repeat=false { spawn "talkat" "listen" "--to-file"; }
+   ```
+
+   sway:
+
+   ```
+   bindsym --no-repeat $mod+apostrophe exec talkat listen
+   bindsym --no-repeat $mod+Shift+apostrophe exec talkat listen --to-file
+   ```
+
+   Hyprland (plain `bind` doesn't repeat; don't use `binde`):
+
+   ```
+   bind = SUPER, apostrophe, exec, talkat listen
+   bind = SUPER SHIFT, apostrophe, exec, talkat listen --to-file
+   ```
+
+   The second binding is optional. It takes long-form notes into a file
+   instead of typing (see [`--to-file`](#long-form-notes---to-file)). If you
+   installed with `setup.sh` and your compositor can't find `talkat`, use
+   the full path `~/.local/bin/talkat`.
+
+3. **Dictate.** Focus a text field, press the hotkey, talk, and press it
+   again. The first time the service starts it downloads the default model
+   (`small.en`, a few hundred MB), so give it a minute.
+   `journalctl --user -u talkat -f` shows the progress.
+
+4. **If something's off,** run `talkat doctor` (see
+   [Troubleshooting](#troubleshooting)).
 
 ## Usage
 
-The model server runs automatically in the background after installation.
-
-### First Time Setup: Calibration (Required)
-
-**Before first use, calibrate your microphone — stay silent for 10 seconds:**
+### Dictation
 
 ```bash
-talkat calibrate
+talkat listen   # start recording
+talkat listen   # stop
 ```
 
-Calibration measures ambient noise and saves a speech threshold to
-`~/.config/talkat/config.json`. That threshold is what tells talkat where
-your pauses are, which is where it cuts a recording into pieces to
-transcribe. Set too high, it hears no pauses and falls back to cutting every
-30 s (text arrives in bigger, later batches); set too low, it cuts on room
-noise. Recalibrate when you switch microphones or change rooms.
+While talkat records:
 
-### Dictation — one command, one hotkey
+- **It types as you talk.** The recording is cut at natural pauses, and each
+  piece is transcribed in the background and typed as soon as it's ready,
+  usually a second or two after you finish a sentence.
+- **Pauses don't stop it.** Recording ends when you toggle it off, after
+  `idle_timeout` (60 s) with no speech, or at `max_recording_duration`
+  (10 minutes, a safety net). While it's quiet, a notification every
+  `idle_notify_interval` (30 s) reminds you it's still recording. Another
+  tells you when it stops on its own.
+- **It keeps a transcript** in
+  `~/.local/share/talkat/transcripts/<YYYYMMDD_HHMMSS>_dictation.txt`
+  (see `save_transcripts` and `transcript_dir`).
+
+`listen` options:
+
+| Option | Effect |
+|---|---|
+| `--to-file` | Long-form notes: append to a file instead of typing ([below](#long-form-notes---to-file)) |
+| `-o FILE` | Write the transcript to `FILE` when you stop, instead of typing |
+| `--postprocess PROFILE` | Run the transcript through an [AI post-processing](#ai-post-processing) profile before it's typed |
+| `--language CODE` | Language for this run (`es`, `de`, `auto`, …) |
+| `--max-recording SECONDS` | Recording cap for this run (overrides `max_recording_duration`) |
+| `--http-timeout SECONDS` | Model server request timeout for this run (overrides `http_timeout`) |
+| `--try-lock` | For scripts: fail instead of stopping a running recording or waiting for another talkat command |
+
+With `-o`, `--postprocess`, or `"output_mode": "clipboard"`, the transcript
+is delivered once when you stop, not typed as you talk.
+
+#### Safeguards
+
+Talkat never silently loses a transcript. A notification tells you whenever
+text goes somewhere other than the window you were typing in.
+
+- **Focus guard.** Text goes only to the window that had focus when you
+  started. If focus moves (alt-tab, a popup), typing stops and the rest goes
+  to the clipboard. This works on niri, sway and Hyprland and is off on other
+  compositors. Turn it off with `"focus_guard": false`.
+- **Modifier guard.** Keys that talkat types combine with keys you're
+  holding, so with Super held down every typed letter becomes a compositor
+  shortcut. Talkat types one key at a time and pauses while Ctrl, Shift, Alt
+  or Super is held. If one stays held for 5 seconds, the rest goes to the
+  clipboard. This guard needs the `input` group (see
+  [ydotool setup](#one-time-ydotool-setup)).
+- **Clipboard fallback.** If ydotool is missing or `ydotoold` isn't running,
+  the transcript goes to the clipboard (`wl-copy`, else `xclip`). With
+  neither installed, it's printed to standard output.
+- **Saved audio.** If a piece still can't be transcribed after retries (the
+  model server is down or keeps failing), its audio is saved under
+  `~/.local/share/talkat/untranscribed/` and typing stops. Everything from
+  that point goes to the clipboard, with a marker in place of the missing
+  part, such as
+  `[untranscribed audio: talkat file ~/.local/share/talkat/untranscribed/20260916_110407_003.wav]`.
+  Run that command later to recover the text. After `max_consecutive_errors`
+  (5) failures in a row, recording stops.
+
+### Long-form notes (`--to-file`)
+
+This is the same toggle with a different output: nothing is typed. Each
+piece is appended to a transcript file as it's recognized, and the whole
+transcript goes to the clipboard when you stop.
 
 ```bash
-talkat listen  # First call: starts recording
-talkat listen  # Second call: stops recording
+talkat listen --to-file               # ~/.local/share/talkat/transcripts/<YYYYMMDD_HHMMSS>_dictation.txt
+talkat listen --to-file -o notes.txt  # append to a file you choose
 ```
 
-`talkat listen` is the whole interface: run it to start, run it again to
-stop. Bind it to one key and press that key twice around whatever you want
-to say — short prompt or half an hour of notes, it's the same command.
+With `--postprocess`, the cleaned-up text is saved next to the raw file (for
+example `notes.processed.txt`), and that version goes to the clipboard. For
+sessions with long silences, raise `idle_timeout`. `max_recording_duration`
+can go up to an hour.
 
-The text is typed as you talk: the recording is cut at natural pauses and
-each piece is transcribed in the background and typed as soon as it's ready,
-so a sentence usually appears a second or two after you finish saying it.
-The whole transcript is also saved to a transcript file. (With
-`--postprocess`, `-o`, or `output_mode: clipboard`, the transcript is
-delivered once, when the recording ends.)
-
-If part of the recording can't be transcribed — the model server is down or
-keeps failing — that audio is saved under
-`~/.local/share/talkat/untranscribed/`, typing stops, and the rest of the
-transcript goes to the clipboard with a marker such as
-`[untranscribed audio: talkat file ~/.local/share/talkat/untranscribed/20260916_110407_003.wav]`
-in place of the missing part; run that command to transcribe it later.
-
-Silence doesn't stop a recording — a pause to think is just a pause. It
-ends when you toggle it off, or on its own after `idle_timeout` with no
-speech (default 60 s) or at `max_recording_duration` (default 10 minutes, a
-safety net for a mic left open). While it's quiet you get a reminder every
-`idle_notify_interval` (default 30 s) that it's still recording, and a
-notification whenever it stops by itself.
-
-### Long-Form Notes (`--to-file`)
-
-Same command, different output: nothing is typed, each piece is appended to
-a transcript file as it's recognized, and the whole transcript goes to the
-clipboard when you stop.
+### Transcribing audio files
 
 ```bash
-talkat listen --to-file                  # ~/.local/share/talkat/transcripts/<time>_dictation.txt
-talkat listen --to-file -o notes.txt     # into a file you choose
+talkat file meeting.mp3                        # print the transcript
+talkat file meeting.mp3 -f srt -o meeting.srt  # subtitles
+talkat file memo.wav -c                        # also copy it to the clipboard
+talkat batch *.wav -o transcripts/             # one output file per input
 ```
 
-It's the same toggle: run `talkat listen` again to stop. Raise
-`idle_timeout` (or `max_recording_duration`) in your config for sessions
-that include long silences.
+Input can be wav, mp3, flac or other common audio formats. Output formats
+are `text` (the default), `json`, `srt` and `vtt`. Files go through the
+running model server, and uploads larger than `max_upload_size_mb` (100 MB)
+are refused. `--language` and `--postprocess` work here too.
 
-### Create Shortcuts
+### Models
 
-One binding is all it takes — the same key starts and stops. For Niri:
-
-```kdl
-Mod+Apostrophe repeat=false { spawn "talkat" "listen"; }
-
-# Optional second binding for long-form notes (file + clipboard, no typing)
-Mod+Shift+Apostrophe repeat=false { spawn "talkat" "listen" "--to-file"; }
+```bash
+talkat model list                 # downloaded models and their sizes
+talkat model download medium.en   # download a model
+talkat model use medium.en        # make it the default (saves model_name)
+systemctl --user restart talkat   # the server loads the model when it starts
 ```
 
-For Sway:
+The faster-whisper sizes are `tiny`, `base`, `small` and `medium`, each
+with an English-only `.en` variant; `large-v1`, `large-v2`, `large-v3`,
+`large`, `large-v3-turbo` (also `turbo`); and `distil-small.en`,
+`distil-medium.en`, `distil-large-v2` and `distil-large-v3`. Larger models
+are more accurate but slower, and the `.en` models only handle English. You
+can `use` a model you haven't downloaded yet: the server fetches it on its
+next start. Any HuggingFace repo with a faster-whisper (CTranslate2) model
+also works, for example `talkat model download org/repo`.
 
-```sh
-bindsym $mod+apostrophe exec talkat listen
-bindsym $mod+Shift+apostrophe exec talkat listen --to-file
-```
+**Vosk.** `talkat model` only manages faster-whisper models. To use Vosk,
+download a model from
+[alphacephei.com/vosk/models](https://alphacephei.com/vosk/models), unpack it
+into `~/.cache/talkat/models/vosk/`, and set `model_name` to the unpacked
+directory's name:
 
-## Configuration
-
-The configuration file is located at `~/.config/talkat/config.json`. You can modify it to:
-- Change the model type (vosk or faster-whisper)
-- Adjust model parameters
-- Configure audio settings
-- Change the model cache location (default `~/.cache/talkat`)
-- Configure transcript saving and clipboard behavior
-
-Example configuration:
 ```json
-{
-    "silence_threshold": 100.0,
-    "model_type": "faster-whisper",
-    "model_name": "small.en",
-    "language": "en",
-    "save_transcripts": true,
-    "idle_timeout": 60.0,
-    "idle_notify_interval": 30.0,
-    "max_recording_duration": 600.0,
-    "transcript_dir": "~/.local/share/talkat/transcripts"
-}
+{ "model_type": "vosk", "model_name": "vosk-model-small-en-us-0.15" }
 ```
+
+Vosk ignores `language` and the [custom vocabulary](#custom-vocabulary),
+because the language is part of the model.
+
+**GPU.** Set `"fw_device": "cuda"`, usually together with
+`"fw_compute_type": "float16"`. This needs an NVIDIA GPU and the CUDA
+libraries that faster-whisper requires.
 
 ### Language
 
-Talkat uses Whisper's language hint to pick the decoder for a given utterance.
-Set it in the config file or override per-invocation with `--language`:
+The default is `en`. Change `language` in your config, or set it for one
+run:
 
 ```bash
-talkat listen --language es           # dictate in Spanish
-talkat file input.wav --language de   # transcribe a German audio file
+talkat listen --language es
+talkat file interview.mp3 --language de
 ```
 
-Use `"auto"` to have faster-whisper detect the language per utterance.
+With `auto`, faster-whisper detects the language of each piece.
+English-only models (`*.en`) ignore this setting. For other languages, switch
+to a multilingual model, for example `talkat model use small` together with
+`"language": "auto"`.
 
-### Output behavior & focus guard
+### Custom vocabulary
 
-`talkat listen` types into the window that had focus when you started
-recording. If focus moved while you were dictating (alt-tab, a popup stole
-focus), talkat refuses to type into the wrong window and copies the
-transcript to the clipboard instead, with a notification. The guard uses
-the compositor's IPC and supports **niri, Hyprland, and sway**; on other
-compositors it silently disables itself (always types).
+Put names, jargon and spellings that talkat keeps getting wrong in
+`~/.config/talkat/dictionary.txt`, one per line. They're passed to
+faster-whisper as a hint. The server reads this file when it starts, so
+restart it after editing: `systemctl --user restart talkat`.
 
-- `focus_guard` (default `true`) — set `false` to always type regardless
-  of focus changes.
-- `output_mode` (default `"type"`) — set `"clipboard"` to never type and
-  always copy transcripts to the clipboard.
-- If typing fails for any reason (ydotoold not running, ydotool missing),
-  the transcript falls back to the clipboard rather than being lost.
+### AI post-processing
 
-**Modifier guard.** Keys typed through ydotool combine with keys you're
-physically holding: hold Super while a transcript is being typed and each
-letter becomes a Super+letter shortcut in your compositor. So talkat types
-one keystroke at a time and, before each, checks that no Ctrl/Shift/Alt/Super
-key is held — typing pauses until you let go. Focus is re-checked at every
-word too. If typing can't continue (focus moved, a key stays held for 5 s,
-you press stop again), the rest of the transcript goes to the clipboard.
-The guard reads key state from `/dev/input`, so it needs the `input` group
-(the one-time ydotool setup above already adds you); `talkat doctor` shows
-whether it's active.
+You can run the transcript through an LLM before it's delivered, to fix
+grammar, format it as a list, or rewrite it as code. Talkat uses the
+OpenAI-compatible chat completions API, which Ollama, llama.cpp's server,
+LM Studio, vLLM, OpenRouter and OpenAI all provide. Define profiles in your
+config ([schema](#ai-post-processing-profiles)) and pick one per run:
 
-### Input device
+```bash
+talkat listen --postprocess tidy
+talkat listen --to-file --postprocess tidy   # applied once, to the whole transcript
+talkat file recording.wav --postprocess tidy
+talkat batch *.wav -o out/ --postprocess tidy
+```
 
-By default talkat records from the system default input device, resolved
-at the moment the stream opens (robust against PipeWire device hotplug).
-To pin a specific microphone, set `input_device_name` to a case-insensitive
-substring of its name (`pactl list sources short` shows names):
+With `--postprocess`, the transcript is typed once after processing, not as
+you talk. If the LLM is unreachable, returns an error, or times out, you get
+the raw transcript and a notification instead. The transcript text goes to
+the profile's `base_url`, so use a local server if it shouldn't leave your
+machine.
+
+## Configuration
+
+Settings live in `~/.config/talkat/config.json` (under `$XDG_CONFIG_HOME` if
+you set it). An optional `/etc/talkat/config.json` provides system-wide
+defaults. Talkat applies its built-in defaults first, then `/etc`, then your
+file, one key at a time, so your file only needs the settings you change:
 
 ```json
-{ "input_device_name": "headset" }
+{
+    "silence_threshold": 180.0,
+    "model_name": "medium.en",
+    "idle_timeout": 120,
+    "input_device_name": "headset",
+    "typing_key_hold_ms": 10
+}
 ```
 
-Notes:
-- Vosk ignores `language` — Vosk language is baked into the model file, so
-  pick a different Vosk model (e.g. `vosk-model-small-fr`) instead.
-- Whisper's English-only variants (`*.en` models) are tuned for English and
-  ignore the hint too. For multilingual use, pick the multilingual variant
-  (e.g. `small` instead of `small.en`).
-- The CLI flag overrides the config file for a single invocation. Server
-  uses its own configured default when the client sends no value.
+- `talkat calibrate` and `talkat model use` change only their own setting
+  in your file (`silence_threshold` and `model_name`). If the file isn't
+  valid JSON, they leave it untouched and tell you instead.
+- Command-line flags (`--language`, `--max-recording`, `--http-timeout`)
+  override the file for one run.
+- Changes apply to the next `talkat` command. The exception is settings the
+  model server reads when it starts: everything under
+  [Model & recognition](#model--recognition) except `language`, plus
+  `server_socket` and `max_upload_size_mb`. After changing those, run
+  `systemctl --user restart talkat`.
 
-### Model management
+**Validation.** Each setting is checked on its own:
 
-Talkat ships with `model_name: "small.en"` as the default. To switch sizes or
-download additional models, use the `model` subcommand:
+- An invalid value, such as the wrong type or out of range, is ignored.
+  Talkat falls back to the value from `/etc/talkat/config.json` or the
+  built-in default, and still applies the rest of the file. Only a file that
+  isn't a valid JSON object is ignored entirely.
+- Unknown keys are flagged, with a suggestion for likely typos
+  (`idle_timout` → `idle_timeout`).
+- Numbers must be JSON numbers (`60`, not `"60"`), and switches must be
+  `true` or `false`. Settings with whole-number defaults, such as counts and
+  the `_ms` settings, take whole numbers only.
+- Paths may start with `~`; otherwise they must be absolute. Symlinks are
+  fine.
 
-```bash
-# List models you've already downloaded
-talkat model list
+`talkat doctor` lists every ignored or unknown setting, and the log records
+them too. The old `device` and `model_cache_dir` keys no longer exist; use
+`fw_device`, `faster_whisper_model_cache_dir` and `vosk_model_base_dir`
+instead.
 
-# Download a new model (faster-whisper resolves the name → HuggingFace repo)
-talkat model download tiny.en
-talkat model download large-v3
+### Settings reference
 
-# Set the default model for the server to load on next start
-talkat model use medium.en
-systemctl --user restart talkat   # pick up the change
+Durations are in seconds unless the name ends in `_ms`. Ranges are
+inclusive.
+
+#### Recording & silence
+
+| Key | Default | Meaning |
+|---|---|---|
+| `silence_threshold` | `200.0` | Level that separates speech from pauses. It decides where a recording is cut into pieces, never what's sent. Set by `talkat calibrate`. 0–10000 |
+| `silence_threshold_fallback` | `500.0` | Threshold `calibrate` saves if it can't measure the room. 0–10000 |
+| `silence_threshold_min` | `50.0` | Lowest threshold `calibrate` will save. 0–10000 |
+| `silence_threshold_max` | `5000.0` | Highest threshold `calibrate` will save. 0–10000 |
+| `input_device_name` | `null` | Use the microphone whose name contains this text, ignoring case. `null` uses the system default input. `talkat -v calibrate` logs the available device names. Up to 256 characters |
+| `max_recording_duration` | `600` | Hard cap on one recording. 0–3600 |
+| `idle_timeout` | `60` | Stop after this long without transcribed speech. 5–86400 |
+| `idle_notify_interval` | `30` | While it's quiet, remind you this often that recording is still on. 5–3600 |
+| `max_consecutive_errors` | `5` | Stop after this many pieces in a row fail to transcribe (their audio is saved). 1–100 |
+| `audio_normalize_gain` | `true` | Even out quiet and loud input before recognition |
+| `audio_target_rms_dbfs` | `-20.0` | Target level for that normalization, in dBFS. −60–0 |
+| `audio_max_gain_db` | `20.0` | Most gain normalization may add, so background noise isn't amplified. 0–60 |
+
+#### Model & recognition
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model_type` | `"faster-whisper"` | `faster-whisper` or `vosk` |
+| `model_name` | `"small.en"` | faster-whisper size or HuggingFace repo id, or the Vosk model's directory name. Set by `talkat model use` |
+| `language` | `"en"` | 2- or 3-letter ISO 639 code (`es`, `de`, `yue`) or `auto`. Ignored by `.en` and Vosk models |
+| `fw_device` | `"cpu"` | `cpu`, `cuda` or `auto` |
+| `fw_compute_type` | `"int8"` | `int8`, `float16` or `float32` |
+| `fw_device_index` | `0` | Which GPU to use with `cuda`. 0–100 |
+| `faster_whisper_model_cache_dir` | `~/.cache/talkat/models/faster-whisper` | Where faster-whisper models are stored |
+| `vosk_model_base_dir` | `~/.cache/talkat/models/vosk` | Where Vosk model directories live |
+| `dictionary_file` | `~/.config/talkat/dictionary.txt` | [Custom vocabulary](#custom-vocabulary), one word or phrase per line |
+| `max_segment_seconds` | `480` | Audio longer than this is split at quiet points and transcribed in parts. This mostly affects long files. 5–3600 |
+
+The model server runs sandboxed and can only write under `~/.cache/talkat`,
+`~/.local/share/talkat` and `~/.config/talkat`. If you move a model
+directory elsewhere, allow the new path with `systemctl --user edit talkat`:
+
+```ini
+[Service]
+ReadWritePaths=/path/to/models
 ```
 
-Known faster-whisper sizes: `tiny`, `tiny.en`, `base`, `base.en`, `small`,
-`small.en`, `medium`, `medium.en`, `large-v1`, `large-v2`, `large-v3`, `large`,
-`large-v3-turbo` / `turbo`, plus the `distil-*` variants. The `.en` suffix
-means English-only — smaller and faster but won't transcribe other languages.
-For multilingual dictation pair `talkat model use small` with `language: "auto"`.
+#### Output & typing
 
-For community-quantized or fine-tuned models, pass an explicit HuggingFace repo
-id: `talkat model download mycorp/my-finetuned-whisper`.
+| Key | Default | Meaning |
+|---|---|---|
+| `output_mode` | `"type"` | `type` types into the focused window. `clipboard` never types and copies the transcript when you stop |
+| `focus_guard` | `true` | Stop typing if the focused window changes (niri, sway, Hyprland) |
+| `typing_key_hold_ms` | `5` | How long each key is held down, in ms (ydotool's `--key-hold`). Lower is faster; raise it if an app drops characters. 0–100 |
+| `typing_key_delay_ms` | `0` | Pause between keystrokes, in ms. Raise it if an app drops or reorders characters. 0–100 |
+| `save_transcripts` | `true` | Save a transcript of each dictation |
+| `transcript_dir` | `~/.local/share/talkat/transcripts` | Where transcripts are saved |
+| `postprocess_profiles` | `{}` | AI post-processing profiles ([schema](#ai-post-processing-profiles)) |
 
-Vosk model management isn't covered by this command — Vosk distributes via
-`https://alphacephei.com/vosk/models/` (separate from HuggingFace), so install
-those manually under your `vosk_model_base_dir`.
+#### Server & network
 
-The model server listens on a unix socket at
-`$XDG_RUNTIME_DIR/talkat/server.sock` (permissions `0600`) — local-only by
-design, no network port to manage. Override with `server_socket` if you
-need to.
+| Key | Default | Meaning |
+|---|---|---|
+| `server_socket` | `$XDG_RUNTIME_DIR/talkat/server.sock` | Unix socket that the server and the `talkat` command share |
+| `http_timeout` | `120` | How long to wait for one transcription request. 0–3600 |
+| `health_check_timeout` | `2` | How long to wait for the server's health check. 0–60 |
+| `file_processing_timeout_base` | `30` | Minimum timeout for `talkat file` and `batch`; longer files get twice their duration. 0–3600 |
+| `max_upload_size_mb` | `100` | Largest file `talkat file` and `batch` will send. 1–2048 |
 
-### AI post-processing (AIPP)
+#### Process timing (rarely needed)
 
-Pipe transcripts through a local or hosted LLM before they hit the keyboard.
-Useful for cleaning up grammar, formatting as bullet lists, rewriting as code,
-etc. Disabled by default; opt in per invocation with `--postprocess <name>`.
+| Key | Default | Meaning |
+|---|---|---|
+| `process_stop_timeout` | `300` | How long a stopping `talkat listen` waits for the last pieces to be transcribed and typed before forcing the recording to end. On a forced stop, untyped text goes to the clipboard and untranscribed audio is saved. 0–300 |
+| `lock_acquire_timeout` | `1.0` | How long a command waits for another talkat command to finish. 0–300 |
+| `lock_retry_interval` | `0.01` | Pause between lock attempts. 0–10 |
+| `process_check_interval` | `0.1` | How often a stopping command checks whether the recording has exited. 0–10 |
+| `background_process_delay` | `0.5` | Pause after force-killing a recording that won't exit. 0–60 |
 
-Profiles live under `postprocess_profiles` in `~/.config/talkat/config.json`.
-Talkat speaks the OpenAI-compatible `/v1/chat/completions` shape, which
-transparently covers Ollama, llama.cpp server, LM Studio, vLLM, OpenRouter,
-and OpenAI itself.
+### AI post-processing profiles
+
+`postprocess_profiles` maps a profile name to its settings:
 
 ```json
 {
@@ -394,99 +474,95 @@ and OpenAI itself.
 }
 ```
 
-Then:
-```bash
-talkat listen --postprocess tidy
-talkat listen --to-file --postprocess tidy   # applied once to the whole transcript
-talkat file recording.wav --postprocess tidy
-talkat batch *.wav -o out/ --postprocess tidy
-```
+| Field | Required | Meaning |
+|---|---|---|
+| `base_url` | yes | `http://` or `https://` base URL of an OpenAI-compatible API. Talkat posts to `<base_url>/chat/completions` |
+| `model` | yes | Model id sent with each request, up to 256 characters |
+| `system_prompt` | yes | Instructions for the rewrite |
+| `api_key_env` | no | Name of the environment variable that holds the API key |
+| `timeout` | no | Seconds to wait for the LLM, more than 0 and up to 600. Default 30 |
 
-**Security note**: API keys are referenced by environment variable name
-(`api_key_env`), never stored in the config file directly. The config file is
-therefore safe to commit / share.
-
-**Fail-open**: if the LLM is unreachable, returns an error, or takes too long,
-talkat logs the failure, fires a notification, and types the **raw** transcript.
-AIPP cannot lose your dictation.
-
-For `long` mode, AIPP runs **once at session end** on the concatenated
-transcript (preserves cross-utterance context, single LLM call). The
-processed result is written alongside the raw transcript as
-`<timestamp>_long.processed.txt` and copied to the clipboard. The raw file
-is kept as the source of truth.
-
-#### Verifying AIPP against a real backend
-
-The mocked tests cover validation and fail-open semantics; for a final
-smoke test against a real OpenAI-compatible server (Ollama, llama.cpp,
-LM Studio, OpenRouter, …), use the `--aipp-live` opt-in:
-
-```bash
-# One-time setup (any OpenAI-compat server works; Ollama is the easiest)
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:0.5b      # ~400 MB, CPU-fast
-
-# Run only the live tests
-uv run pytest --aipp-live -k aipp_live -v
-```
-
-The `aipp_live`-marked tests skip by default and skip cleanly with a
-friendly message if the backend isn't reachable. Override the defaults
-with `OLLAMA_BASE_URL` / `OLLAMA_MODEL` env vars to point at a different
-server. CI runs these on every push against a freshly-installed Ollama
-(see `.github/workflows/ci.yml::aipp-live`).
-
-### Transcript Features
-- All transcripts (both short and long mode) are saved to `~/.local/share/talkat/transcripts/`
-- Short mode: saves as `YYYYMMDD_HHMMSS_short.txt`
-- Long mode: saves as `YYYYMMDD_HHMMSS_long.txt`
-- Disable transcript saving: set `"save_transcripts": false`
-- Change transcript location: set `"transcript_dir": "/your/custom/path"`
-
-## How It Works
-
-1. The model server runs as a systemd service in the background, preloading the speech recognition model for faster startup
-2. When you run `talkat listen`, it:
-   - Checks if a recording is already active (toggle feature)
-   - If no recording: starts recording from your microphone
-   - If recording active: stops the recording and processes transcription
-   - Streams audio to the server for transcription
-   - Uses ydotool to simulate keyboard input with the transcribed text
-3. The server supports both Vosk and Faster-Whisper models
-4. Everything the microphone hears from the moment the stream opens is sent
-   to the server — beginnings are never clipped by client-side gating
-   - The calibrated threshold is only used to detect when you've *stopped*
-     talking (silence auto-stop)
-   - The server-side VAD filter strips leading silence before ASR
+Any other field is an error. The API key itself never goes in the config
+file, only the name of the variable that holds it, so the file is safe to
+share. That variable must be set where talkat runs. For a hotkey, that's
+your compositor's environment, not just your shell.
 
 ## Troubleshooting
 
-Start with `talkat doctor` — it checks install shadowing, service health,
-client/server version skew, audio devices, and desktop tooling in one shot.
+Start with `talkat doctor`. It checks:
 
-1. If ydotool isn't working:
-   - Make sure `ydotoold` is running
-   - Check that your user is in the input group
-   - Verify the udev rules are installed
-   - Log out and back in after adding yourself to the input group
+- which talkat you're running, and whether a stale copy shadows it on PATH
+  or in systemd
+- the model server, and that the server and the command are the same
+  version
+- ydotool, the clipboard and notification tools, and the focus and modifier
+  guards
+- your audio devices
+- your config files
 
-2. If the model server isn't starting:
-   - Check status: `systemctl --user status talkat`
-   - Check logs: `journalctl --user -u talkat -f`
-   - Restart: `systemctl --user restart talkat`
-   - Probe the socket: `curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/server.sock" http://talkat/health`
-   - Verify model files are downloaded in `~/.cache/talkat/`
+It exits non-zero if anything failed.
 
-3. If toggle isn't working:
-   - PID/lock files live at `${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/` (typically `/run/user/$UID/talkat/`)
-   - Check: `ls "${XDG_RUNTIME_DIR:-/run/user/$UID}/talkat/listen.pid"`
-   - Clean stale PIDs: `rm "${XDG_RUNTIME_DIR:-/run/user/$UID}"/talkat/*.pid`
-   - Update: `cd talkat && git pull && ./setup.sh`
+**Text lands on the clipboard instead of being typed.** The notification
+says why:
 
-4. Audio issues:
-   - Run calibration: `talkat calibrate` (remember to stay SILENT during calibration)
-   - If speech isn't detected, your threshold might be too high
-   - If recording triggers on background noise, recalibrate in a quieter environment
-   - Check available audio devices: `pactl list sources`
-   - Verify PyAudio can access your microphone
+- If ydotool is missing or `ydotoold` isn't running, see
+  [ydotool setup](#one-time-ydotool-setup). To test ydotool on its own,
+  run `ydotool type hello` in a terminal; it should type `hello` at your
+  prompt.
+- If focus moved during dictation, that's the focus guard working.
+  `"focus_guard": false` turns it off.
+- If a modifier key stayed held, typing pauses while Ctrl, Shift, Alt or
+  Super is down. Check for a stuck key.
+
+**Characters go missing or arrive out of order.** Some apps can't keep up
+with fast typing. Raise `typing_key_hold_ms` (ydotool's own default is 20)
+or `typing_key_delay_ms`.
+
+**The server isn't responding.** Check the service, read its log, and
+restart it:
+
+```bash
+systemctl --user status talkat
+journalctl --user -u talkat -e
+systemctl --user restart talkat
+curl --unix-socket "$XDG_RUNTIME_DIR/talkat/server.sock" http://talkat/health
+```
+
+The first start downloads the model, so it can take a while.
+
+**Wrong microphone, or no audio.** The Audio section of `talkat doctor`
+shows the default input and whether your `input_device_name` matches a
+device. `talkat -v calibrate` logs every input device name.
+
+**Text arrives late in big chunks, or pieces are cut mid-word.** Run
+`talkat calibrate` again. A threshold set too low hears room noise as speech,
+finds no pauses, and falls back to cutting every 30 seconds. One set too high
+mistakes quiet speech for pauses and cuts mid-word.
+
+**The hotkey starts and immediately stops.** Your binding repeats while the
+key is held. Use `repeat=false` (niri) or `--no-repeat` (sway).
+
+**The toggle gets confused after a crash.** If no recording is running
+(`pgrep -af "talkat listen"` shows nothing), delete the stale PID file:
+`rm "$XDG_RUNTIME_DIR/talkat/listen.pid"`.
+
+**Logs and diagnostics:**
+
+- The command and the server both log to
+  `~/.local/share/talkat/logs/talkat.log`, which rotates. The server's
+  output is also in `journalctl --user -u talkat`.
+- For debug detail in the log, add `-v` (`talkat -v listen`, which works in
+  a hotkey binding too), or set `TALKAT_DEBUG=1`.
+- Each dictation writes timings, the model used, and any errors to
+  `~/.local/share/talkat/diagnostics/diagnostics.latest.json`. The last 200
+  records are kept.
+
+## Development
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers running a checkout without
+disturbing your installed copy, the checks CI runs, and packaging.
+Architecture notes and the release process are in [CLAUDE.md](CLAUDE.md).
+
+## License
+
+[MIT](LICENSE)

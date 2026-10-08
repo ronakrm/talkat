@@ -19,10 +19,10 @@ from typing import Any
 
 import httpx
 
-from .config import CODE_DEFAULTS, load_app_config
+from .config import CODE_DEFAULTS, load_app_config, load_app_config_with_issues
 from .focus import compositor_name
 from .keyboard import ModifierWatch
-from .paths import CONFIG_FILE, RUNTIME_DIR, SYSTEM_CONFIG_FILE
+from .paths import CONFIG_FILE, RUNTIME_DIR, get_config_files
 
 OK = "✓"
 BAD = "✗"
@@ -272,12 +272,26 @@ def _check_audio(report: _Report) -> None:
 
 
 def _check_config(report: _Report) -> None:
+    """Which config files apply, and every setting in them that talkat ignores.
+
+    An ignored setting is a warning — its default is used and the rest of the
+    file still applies. A file that can't be parsed at all is a failure:
+    nothing in it takes effect.
+    """
     report.section("Config & paths")
-    if SYSTEM_CONFIG_FILE.exists():
-        report.line(OK, "system config", str(SYSTEM_CONFIG_FILE))
-    if CONFIG_FILE.exists():
-        report.line(OK, "user config", str(CONFIG_FILE))
-    else:
+    _, issues = load_app_config_with_issues()
+    files = get_config_files()
+    for path in files:
+        label = "user config" if path == CONFIG_FILE else "system config"
+        skipped = [issue for issue in issues if issue.path == path and issue.key is None]
+        if skipped:
+            report.line(BAD, label, str(skipped[0]))
+        else:
+            report.line(OK, label, str(path))
+        for issue in issues:
+            if issue.path == path and issue.key is not None:
+                report.line(WARN, label, issue.detail)
+    if CONFIG_FILE not in files:
         report.line(OK, "user config", "none (using defaults; run `talkat calibrate` to create)")
     report.line(OK, "runtime dir", str(RUNTIME_DIR))
     if os.environ.get("TALKAT_RUNTIME_DIR"):

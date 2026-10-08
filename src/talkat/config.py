@@ -63,11 +63,14 @@ CODE_DEFAULTS: dict[str, Any] = {
     # The stop wait must cover the work a listen process legitimately does
     # AFTER the stop signal. Typing as you talk leaves little: the last
     # segment's ASR and typing. The ceiling is sized for a max-length
-    # recording delivered at once (--postprocess): the LLM call plus ~22 ms
-    # per typed character, ~2.5 min for 10 min of speech. The poll returns the
-    # moment the process exits, so the common case doesn't feel this ceiling —
-    # but hitting it escalates to SIGTERM, which aborts: untyped text goes to
-    # the clipboard and untranscribed audio is saved.
+    # recording delivered at once (--postprocess): the LLM call plus ~6 ms
+    # per typed character at the default typing pace, under a minute for 10
+    # min of speech. Slower typing settings stretch that (at the 100 ms
+    # maximums, ~0.2 s a character), making a long delivery likelier to hit
+    # the ceiling. The poll returns the moment the process exits, so the
+    # common case doesn't feel this ceiling — but hitting it escalates to
+    # SIGTERM, which aborts: untyped text goes to the clipboard and
+    # untranscribed audio is saved. Nothing is lost either way.
     "process_stop_timeout": 300.0,
     "lock_acquire_timeout": 1.0,  # Max time to wait for lock acquisition
     "lock_retry_interval": 0.01,  # Sleep interval between lock acquisition attempts
@@ -96,6 +99,14 @@ CODE_DEFAULTS: dict[str, Any] = {
     # and transcription end (transcript goes to the clipboard instead).
     # Active on compositors with a supported IPC: niri, Hyprland, sway.
     "focus_guard": True,
+    # Typing pace. Each keystroke is its own `ydotool type` call (so the
+    # modifier guard can check between keys) and costs this hold plus ~1 ms
+    # to spawn ydotool. ydotool's own default hold is 20 ms.
+    "typing_key_hold_ms": 5,
+    # Pause between keystrokes, for apps that drop keys typed too fast. talkat
+    # sleeps it itself: ydotool's --key-delay only separates the keys of one
+    # call, and each call carries a single key.
+    "typing_key_delay_ms": 0,
     # Dictionary Configuration
     "dictionary_file": str(DICTIONARY_FILE),
     # AI Post-Processing (AIPP) — opt-in, off by default.

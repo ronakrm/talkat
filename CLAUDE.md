@@ -59,7 +59,8 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
      file <path>]` marker takes its place, and listen puts everything from
      that point on the clipboard
    - Types via ydotool (Wayland), with focus + modifier guards and clipboard
-     fallback — the transcript is never silently lost
+     fallback — the transcript is never silently lost; paced by
+     `typing_key_hold_ms` (5 ms a key) and `typing_key_delay_ms` (0 between keys)
    - **Toggle support**: PID file tracking for start/stop with same command
    - Graceful interruption handling via signals
 
@@ -113,6 +114,13 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
    - Needs read access to `/dev/input` (`input` group); unreadable = guard off
    - Keyboard fds are opened once per typing run: an evdev close costs
      5–13 ms, a key-state read ~2 µs
+   - Pace: each call is `ydotool type --key-hold=<typing_key_hold_ms>` (5 ms;
+     ydotool's default is 20). `typing_key_delay_ms` is talkat's own sleep
+     between keys, taken before the guard checks — ydotool's `--key-delay`
+     only separates the keys of one call, so it never applies here
+   - Each call pipes ydotool's stdout so `subprocess.run`'s timeout wait
+     wakes at exit; with stdout inherited it polls with doubling sleeps
+     (1, 2, 4, 8, 16 ms), which rounded every 20 ms keystroke up to ~31 ms
 
 8. **Environment self-check** (`doctor.py`)
    - `talkat doctor`: install origin, PATH/systemd shadowing, server health
@@ -533,6 +541,9 @@ Still true / watch out for:
      by design (`focus_guard: false` disables)
    - Typing pauses while any Ctrl/Shift/Alt/Super key is held and gives the
      rest to the clipboard after 5 s — check for a stuck key
+   - Characters dropped or out of order in some app → slow typing down:
+     raise `typing_key_hold_ms` (20 is ydotool's own default) or add a
+     `typing_key_delay_ms` pause
    - Test: `ydotool type "test"`
 
 4. **"Toggle not working"**

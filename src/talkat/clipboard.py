@@ -1,6 +1,6 @@
 """Clipboard helper — wl-copy (Wayland) → xclip (X11) fallback chain.
 
-Single source of truth for clipboard writes. Both ``main.listen_continuous``
+Single source of truth for clipboard writes. Both ``main.run_dictation``
 and ``file_processor.process_audio_file_command`` route through here so we
 don't duplicate the fallback logic in two places.
 """

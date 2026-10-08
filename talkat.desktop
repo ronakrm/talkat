@@ -9,16 +9,16 @@ Terminal=true
 Categories=AudioVideo;Audio;Utility;Accessibility;
 Keywords=voice;dictation;speech;recognition;transcription;whisper;
 StartupNotify=false
-Actions=Listen;Long;Calibrate;Server;
+Actions=Listen;Notes;Calibrate;Server;
 
 [Desktop Action Listen]
 Name=Start Recording
 Exec=talkat listen
 Icon=media-record
 
-[Desktop Action Long]
-Name=Long Dictation Mode
-Exec=talkat long
+[Desktop Action Notes]
+Name=Dictate to a Transcript File
+Exec=talkat listen --to-file
 Icon=media-record
 
 [Desktop Action Calibrate]

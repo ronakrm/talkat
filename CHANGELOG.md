@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-08
+
+Dictation is now **one route with one hotkey**: `talkat listen` toggles it on
+and off. The microphone stays open for the whole recording, speech is cut at
+natural pauses and transcribed in the background, and text is typed as you
+talk. A half-hour of notes is just a long recording — `long`, `start-long`,
+`stop-long` and `toggle-long` are gone, and `listen --to-file` covers what
+long mode was for. Also fixes recordings cut off at 30 s and typed text
+firing compositor shortcuts.
+
+### Migration from 1.x
+- **Hotkeys** — one binding does it all, and it needs `repeat=false` or
+  holding the key re-triggers it:
+  ```kdl
+  Mod+Apostrophe repeat=false { spawn "talkat" "listen"; }              # niri
+  Mod+Shift+Apostrophe repeat=false { spawn "talkat" "listen" "--to-file"; }
+  ```
+  ```sh
+  bindsym $mod+apostrophe exec talkat listen                            # sway
+  ```
+  A `talkat long` binding becomes `talkat listen --to-file`; a
+  `toggle-long` binding can simply go.
+- **Scripts** — `talkat long` → `talkat listen --to-file`;
+  `start-long` / `stop-long` / `toggle-long` → `talkat listen` (it
+  toggles). `--silence-duration`, `--no-clipboard` and `--background` are
+  gone.
+- **Config** — nothing to do: keys this release doesn't know are dropped
+  from `~/.config/talkat/config.json` with a log line. If you had tuned
+  `long_mode_silence_timeout` or `long_mode_max_session_duration`, use
+  `idle_timeout` and `max_recording_duration` instead. Re-run
+  `talkat calibrate` if dictation pauses aren't being found — the
+  threshold's only job now is telling the segmenter where to cut.
+- **Mixed versions work** either way: a 2.0 client against a 1.x server
+  loses only the cross-segment context (the server ignores the new `prompt`
+  field), and a 1.x client against a 2.0 server is unchanged. `talkat
+  doctor` reports the skew. The AUR package ships both, so restart the
+  service after upgrading: `systemctl --user restart talkat`.
+
+### Removed
+- **`talkat long`, `start-long`, `stop-long`, `toggle-long`** — breaking.
+  `talkat listen` is the whole interface; migrate hotkeys:
+  `talkat long` → `talkat listen --to-file`, and a `toggle-long` binding can
+  simply go (one `talkat listen` binding already toggles). Bind it with
+  `repeat=false` so holding the key can't re-trigger it.
+- Config keys `silence_duration`, `clipboard_on_long`,
+  `long_mode_silence_timeout`, `long_mode_max_session_duration` and
+  `long_mode_max_consecutive_errors`, and the `--silence-duration`,
+  `--no-clipboard` and `--background` flags. Replaced by `idle_timeout`,
+  `idle_notify_interval` and `max_consecutive_errors`. Keys a release no
+  longer knows are dropped from the user's config with a log line, so a
+  stale config file is harmless.
+- `AudioSession`'s silence auto-stop and level tracking: capture decides
+  nothing about speech any more (the segmenter decides where to cut, the
+  server's VAD what to trim). `ProcessManager.toggle` and
+  `start_background_process` went with the background long mode.
+
+### Fixed
+- **`talkat listen` cut dictation off at 30 s.** The `max_recording_duration`
+  default ended the recording silently, mid-sentence: everything said after
+  it was lost, and the transcript started typing while the user was still
+  talking. The default is now 600 s — a safety net for a mic left open, not
+  a usage limit — and a recording that ends on its own says so at once.
+- **Typed text triggered compositor shortcuts.** ydotoold's virtual keyboard
+  shares the seat's modifier state, so holding Super while a transcript was
+  being typed turned its letters into shortcuts (on niri: Space opened the
+  launcher, T a terminal, H/L moved focus). Typing now sends one keystroke
+  per `ydotool` call and checks the physical keyboard (evdev `EVIOCGKEY`)
+  before each, pausing while any modifier is held.
+- **Long recordings lost speech between utterances.** The old long mode
+  stopped reading the stream while each utterance was transcribed, then
+  closed and reopened the microphone, and hard-cut utterances at 60 s —
+  often mid-word.
+- **A pause to think ended a recording.** The 3 s post-speech stop is gone:
+  silence no longer stops anything, and a quiet session announces itself
+  instead of looking dead.
+- `talkat listen --max-recording` was ignored: capture re-read the config
+  files instead of using the merged config.
+- Stop signals could SIGKILL ydotool mid-keystroke (leaving the key held
+  down) and lose the transcript: the second signal raised
+  `KeyboardInterrupt` inside `subprocess.run`. Handlers no longer raise.
+
+### Changed
+- **Dictation sessions** (`session.py`, `segmenter.py`): one open microphone
+  per recording; the stream is cut at the first ≥0.4 s pause after 3 s of
+  audio (or at the quietest moment before 30 s of continuous speech) and
+  each segment is transcribed in order while recording continues, with the
+  previous segment's text sent as context. On a 3-minute read-speech sample
+  the segmented transcript matched whole-file transcription to 0.2% of
+  words. Segments always concatenate back to the captured audio.
+- **Text is typed as you talk**: each segment is typed as soon as it's
+  transcribed, about 1–2 s after you finish a sentence. `--to-file`,
+  `--postprocess`, `-o` and `output_mode: clipboard` still deliver once, at
+  the end.
+- **How a recording ends**: you toggle it off; or `idle_timeout` (60 s with
+  no transcribed speech) stops it, having said so every
+  `idle_notify_interval` (30 s) while it was quiet; or
+  `max_recording_duration` (10 min) is reached; or
+  `max_consecutive_errors` (5) segments in a row can't be transcribed.
+- **Untranscribable audio is never lost**: a segment is retried (0.5/2/5 s
+  backoff; one attempt once the server is known to be failing), then saved
+  as a WAV under `~/.local/share/talkat/untranscribed/`, with an
+  `[untranscribed audio: talkat file <path>]` marker in the transcript.
+  Typing stops at the gap and the rest goes to the clipboard.
+- Whatever can't be typed — focus moved (now re-checked at every word), a
+  modifier stayed held for 5 s, typing stopped or failed — goes to the
+  clipboard, and the notification says so.
+- Stop signals: the first ends the recording (everything recorded is still
+  transcribed and delivered); the second aborts — typing stops between
+  keystrokes, no new requests start, untranscribed audio is saved — within
+  `stop_process`'s one-second SIGKILL window.
+- `/transcribe_stream` accepts an optional `prompt` (preceding transcript)
+  in its metadata, placed after the dictionary words in Whisper's
+  `initial_prompt`. Older servers ignore the field.
+- `process_stop_timeout` default 20 s → 300 s, covering a max-length
+  recording delivered at once (`--postprocess`); the stop wait still returns
+  the moment the process exits.
+- `ydotool type` is called with `--escape=0` (a lone `\` is typed, not
+  swallowed), and non-ASCII characters are never passed to it (ydotool
+  1.0.x reads outside its keymap for them; they were dropped before too).
+- `TranscriptionClient` moved to `talkat.client` and now transcribes a
+  buffer (`transcribe_audio`) rather than recording one utterance itself.
+- `talkat calibrate` still sets `silence_threshold`, but it now only tells
+  the segmenter where your pauses are.
+- Diagnostics records describe the session: segments, untranscribed
+  segments, cut reasons, stop reason, idle stop, session seconds.
+
+### Added
+- `talkat listen --to-file`: appends each piece to the transcript file as
+  it's recognized and copies the whole transcript to the clipboard at the
+  end, typing nothing. `-o PATH` chooses the file.
+- `talkat doctor` reports whether the modifier guard is active (it needs
+  read access to `/dev/input`, i.e. the `input` group).
+
 ## [1.1.1] - 2026-07-12
 
 Hotfix: toggle-stop was losing the transcript — present since v1.0.0, but

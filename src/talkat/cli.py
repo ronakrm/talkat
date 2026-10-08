@@ -12,13 +12,6 @@ from .process_manager import LockTimeout, ProcessManager
 logger = get_logger(__name__)
 
 
-def get_long_pid() -> int | None:
-    """Return the PID of the running long-dictation process, or None."""
-    pm = ProcessManager("long_dictation")
-    is_running, pid = pm.is_running()
-    return pid if is_running else None
-
-
 def get_listen_pid() -> int | None:
     """Return the PID of the running listen process, or None."""
     pm = ProcessManager("listen")
@@ -26,80 +19,10 @@ def get_listen_pid() -> int | None:
     return pid if is_running else None
 
 
-def _start_long(pm: ProcessManager, debug: bool) -> int:
-    """Start the long-dictation background process. Caller holds the pm lock.
-
-    Notifications are intentionally NOT fired here — the spawned process emits
-    its own start/stop notifications from main.py.listen_continuous so the user
-    sees exactly one "started" and one "stopped" toast per cycle.
-    """
-    cmd = [sys.executable, "-m", "talkat.cli", "long", "--background"]
-
-    env = None
-    if debug:
-        env = os.environ.copy()
-        env["TALKAT_DEBUG"] = "1"
-
-    pid = pm.start_background_process(cmd, debug=debug, env=env)
-    if pid:
-        logger.info(f"Long dictation started in background (PID: {pid})")
-        return 0
-    logger.error("Failed to start long dictation")
-    return 1
-
-
-def _stop_long(pm: ProcessManager) -> int:
-    """Stop the long-dictation background process. Caller holds the pm lock.
-
-    The long process self-terminates on extended silence or max session
-    duration (see listen_continuous), so manual stop is the rare path.
-
-    The running process emits the user-facing stop notification (with
-    transcript summary) when it shuts down; we don't fire one here.
-    """
-    return 0 if pm.stop_process() else 1
-
-
-def start_long_background(debug: bool = False, try_only: bool = False) -> int:
-    """Start long dictation in background. Refuses if already running."""
-    pm = ProcessManager("long_dictation")
-    try:
-        with pm.locked(try_only=try_only):
-            if get_long_pid():
-                logger.info("Long dictation is already running.")
-                return 1
-            return _start_long(pm, debug)
-    except LockTimeout as e:
-        logger.error(str(e))
-        return 1
-
-
-def stop_long_background(try_only: bool = False) -> int:
-    """Stop the background long-dictation process."""
-    pm = ProcessManager("long_dictation")
-    try:
-        with pm.locked(try_only=try_only):
-            return _stop_long(pm)
-    except LockTimeout as e:
-        logger.error(str(e))
-        return 1
-
-
-def toggle_long_background(debug: bool = False, try_only: bool = False) -> int:
-    """Toggle long dictation — start if stopped, stop if running."""
-    pm = ProcessManager("long_dictation")
-    try:
-        return pm.toggle(lambda: _start_long(pm, debug), try_only=try_only)
-    except LockTimeout as e:
-        logger.error(str(e))
-        return 1
-
-
 def _overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     """Collect non-None CLI config overrides keyed by their config name."""
     mapping: dict[str, Any] = {
         "max_recording_duration": getattr(args, "max_recording", None),
-        "silence_duration": getattr(args, "silence_duration", None),
         "http_timeout": getattr(args, "http_timeout", None),
         "language": getattr(args, "language", None),
     }
@@ -164,24 +87,6 @@ def _run_model_command(args: argparse.Namespace) -> int:
     return 1
 
 
-def stop_listen_process(try_only: bool = False) -> int:
-    """Stop the running listen process.
-
-    The running process emits its own typed/saved/no-text notification when
-    it finishes transcribing — we don't fire one here.
-    """
-    pm = ProcessManager("listen")
-    try:
-        with pm.locked(try_only=try_only):
-            if pm.stop_process():
-                return 0
-            logger.info("No active listen process found.")
-            return 1
-    except LockTimeout as e:
-        logger.error(str(e))
-        return 1
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Talkat - Voice Command System")
     parser.add_argument(
@@ -193,16 +98,23 @@ def main() -> None:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode (verbose logging + background process output)",
+        help="Enable debug mode (verbose logging)",
     )
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     listen_parser = subparsers.add_parser(
         "listen",
-        help="Toggle voice recording - starts if not running, stops if already recording",
+        help="Toggle dictation - starts if not running, stops if already recording",
     )
     listen_parser.add_argument(
         "-o", "--output", help="Save transcription to file instead of typing to screen"
+    )
+    listen_parser.add_argument(
+        "--to-file",
+        action="store_true",
+        help="Append each piece to the transcript file as it is recognized and copy the "
+        "whole transcript to the clipboard at the end, instead of typing (long-form "
+        "note taking). Use -o to choose the file.",
     )
     listen_parser.add_argument(
         "--try-lock",
@@ -214,13 +126,7 @@ def main() -> None:
         "--max-recording",
         type=float,
         metavar="SECONDS",
-        help="Cap on a single utterance (overrides max_recording_duration).",
-    )
-    listen_parser.add_argument(
-        "--silence-duration",
-        type=float,
-        metavar="SECONDS",
-        help="Seconds of silence before the recording stops (overrides silence_duration).",
+        help="Cap on one recording (overrides max_recording_duration).",
     )
     listen_parser.add_argument(
         "--http-timeout",
@@ -240,71 +146,6 @@ def main() -> None:
         metavar="PROFILE",
         help="Pipe the transcript through the named AIPP profile from config "
         "(see 'postprocess_profiles'). Falls back to raw transcript on any error.",
-    )
-
-    long_parser = subparsers.add_parser(
-        "long", help="Start long dictation mode (continuous recording)"
-    )
-    long_parser.add_argument(
-        "-o", "--output", help="Save transcription to specified file instead of default location"
-    )
-    long_parser.add_argument(
-        "--background",
-        action="store_true",
-        help=argparse.SUPPRESS,  # Internal flag used by start-long/toggle-long
-    )
-    long_parser.add_argument(
-        "--no-clipboard",
-        action="store_true",
-        help="Disable clipboard copy when long dictation ends.",
-    )
-    long_parser.add_argument(
-        "--silence-duration",
-        type=float,
-        metavar="SECONDS",
-        help="Per-utterance silence cutoff inside the long session (overrides silence_duration).",
-    )
-    long_parser.add_argument(
-        "--http-timeout",
-        type=float,
-        metavar="SECONDS",
-        help="Per-request HTTP timeout against the model server (overrides http_timeout).",
-    )
-    long_parser.add_argument(
-        "--language",
-        type=str,
-        metavar="CODE",
-        help="ASR language code (e.g. 'en', 'es', 'auto'). Overrides config 'language'.",
-    )
-    long_parser.add_argument(
-        "--postprocess",
-        type=str,
-        metavar="PROFILE",
-        help="Apply the named AIPP profile to the full transcript at session end. "
-        "Writes a side-by-side '.processed.txt' and clipboards the processed result.",
-    )
-
-    start_long_parser = subparsers.add_parser(
-        "start-long", help="Start long dictation in background"
-    )
-    start_long_parser.add_argument(
-        "--try-lock",
-        action="store_true",
-        help="Exit immediately if another talkat command holds the lock.",
-    )
-    stop_long_parser = subparsers.add_parser("stop-long", help="Stop background long dictation")
-    stop_long_parser.add_argument(
-        "--try-lock",
-        action="store_true",
-        help="Exit immediately if another talkat command holds the lock.",
-    )
-    toggle_long_parser = subparsers.add_parser(
-        "toggle-long", help="Toggle long dictation (start if stopped, stop if running)"
-    )
-    toggle_long_parser.add_argument(
-        "--try-lock",
-        action="store_true",
-        help="Exit immediately if another talkat command holds the lock.",
     )
 
     subparsers.add_parser("server", help="Start the model server")
@@ -421,36 +262,16 @@ def main() -> None:
         except LockTimeout as e:
             logger.error(str(e))
             sys.exit(1)
-        from .main import listen_once
+        from .main import run_dictation
 
         sys.exit(
-            listen_once(
+            run_dictation(
                 output_file=args.output,
+                to_file=args.to_file,
                 config_overrides=_overrides_from_args(args),
                 postprocess=args.postprocess,
             )
         )
-    elif args.command == "long":
-        from .config import load_app_config
-        from .main import listen_continuous
-
-        config = load_app_config()
-        clipboard_enabled = config.get("clipboard_on_long", True) and not args.no_clipboard
-        sys.exit(
-            listen_continuous(
-                output_file=args.output,
-                background=args.background,
-                clipboard=clipboard_enabled,
-                config_overrides=_overrides_from_args(args),
-                postprocess=args.postprocess,
-            )
-        )
-    elif args.command == "start-long":
-        sys.exit(start_long_background(debug=args.debug, try_only=args.try_lock))
-    elif args.command == "stop-long":
-        sys.exit(stop_long_background(try_only=args.try_lock))
-    elif args.command == "toggle-long":
-        sys.exit(toggle_long_background(debug=args.debug, try_only=args.try_lock))
     elif args.command == "server":
         from .model_server import main as server_main
 

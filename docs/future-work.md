@@ -5,7 +5,7 @@ This document is the parking lot for ideas we surveyed from
 not to ship right now. The first section is the one big idea we *do* want
 to revisit (multi-engine cross-check); the rest is a record of items we
 deliberately declined and why, so future contributors don't relitigate
-the same questions.
+the same questions. Section 4 records a follow-up of our own that shipped.
 
 ## 1. Multi-engine ASR cross-check (deferred)
 
@@ -37,12 +37,14 @@ mode on long clips.
 
 ### Sketch of how it would land
 
-Adding a `cross_check` flag (config + per-invocation CLI) to long mode.
+Adding a `cross_check` flag (config + per-invocation CLI), most plausibly
+for `listen --to-file` sessions where a few seconds at the end don't hurt.
 When set:
 
-1. `listen_continuous` keeps each utterance's raw float32 buffer in
-   memory (or, for very long sessions, in a temp file under
-   `XDG_RUNTIME_DIR/talkat/`).
+1. The dictation session keeps each segment's audio after transcribing it
+   (in memory, or for very long sessions a temp file under
+   `XDG_RUNTIME_DIR/talkat/`) — the saved-audio path in `session.py` already
+   writes segment WAVs, so the plumbing is half there.
 2. At session end (after stop, before clipboard copy), spin up a second
    backend instance — likely a different model family (Vosk against
    Faster-Whisper, or two Whisper sizes) so they make uncorrelated
@@ -182,3 +184,29 @@ same PR:
 
 The remaining ideas on this page either need a design pass (#1) or
 deliberately don't fit Talkat (#2).
+
+## 4. Merge `toggle-long` into `listen` (shipped)
+
+Done — recorded here because this page proposed it. `listen`, `long`,
+`start-long`, `stop-long` and `toggle-long` are now one route
+(`main.run_dictation`, toggled by `talkat listen`). Everything records the
+same way through `DictationSession`; what used to be long mode is
+`listen --to-file` (append to the transcript file as pieces land, clipboard
+at the end, nothing typed), and a 30-minute session is simply a long
+recording.
+
+Decisions that settled it:
+
+* **One hotkey, toggle only.** Press-and-hold was considered and dropped:
+  no compositor we target can bind a key release (niri rejects
+  `on-release`), so it would have meant watching evdev for the launching
+  key to come up — complexity and surprises in other people's setups for a
+  second way to do the same thing.
+* **Silence doesn't stop a recording.** A pause to think is just a pause.
+  `idle_timeout` (60 s without transcribed speech) ends a forgotten
+  session, `idle_notify_interval` (30 s) says it's still recording, and
+  `max_recording_duration` (10 min) is the ceiling. The old 3 s
+  post-speech stop and `AudioSession`'s level tracking are gone.
+* **Background spawning went with it.** The hotkey's own process does the
+  recording, so `ProcessManager.toggle` and `start_background_process`
+  were removed.

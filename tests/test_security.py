@@ -77,9 +77,9 @@ def test_validate_distil_whisper_rejected():
         validate_json_config({"model_type": "distil-whisper"})
 
 
-def test_validate_clipboard_on_long_must_be_bool():
+def test_validate_save_transcripts_must_be_bool():
     with pytest.raises(ValueError):
-        validate_json_config({"clipboard_on_long": "yes"})
+        validate_json_config({"save_transcripts": "yes"})
 
 
 def test_validate_negative_http_timeout_rejected():
@@ -351,11 +351,10 @@ def test_safe_subprocess_run_explicit_timeout_passed_through(monkeypatch: pytest
 def test_safe_subprocess_run_explicit_None_timeout_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Passing timeout=None must disable the default — required by typing-long-text.
+    """Passing timeout=None must disable the default 30s for known-long commands.
 
-    ``listen_once`` passes ``timeout=None`` for ``ydotool type --key-delay=1``
-    because a long transcript can take well over 30s. If the default kicked in
-    here, dictation of long passages would silently get truncated.
+    (Typing no longer needs it — one ydotool call per keystroke — but the
+    escape hatch is part of safe_subprocess_run's contract.)
     """
     fake = _patch_subprocess_run(monkeypatch)
     safe_subprocess_run(["ydotool", "type", "very long text"], timeout=None)

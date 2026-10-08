@@ -116,15 +116,23 @@ class ModelService:
             self.dictionary_words = []
             return []
 
-    def get_initial_prompt(self) -> str | None:
-        """Build initial_prompt for faster-whisper from dictionary words.
+    def get_initial_prompt(self, context: str | None = None) -> str | None:
+        """Build faster-whisper's initial_prompt: dictionary words, then ``context``.
+
+        ``context`` is the transcript just before this audio (live dictation
+        sends the previous segment's text). Whisper keeps only the last ~223
+        prompt tokens, so the context goes last: a long dictionary is what gets
+        truncated, never the words the new audio continues.
 
         Vosk ignores ``initial_prompt`` (see VoskBackend.transcribe). Other
         future backends decide for themselves what to do with this hint.
         """
-        if not self.dictionary_words:
-            return None
-        return ", ".join(self.dictionary_words)
+        parts: list[str] = []
+        if self.dictionary_words:
+            parts.append(", ".join(self.dictionary_words))
+        if context and context.strip():
+            parts.append(context.strip())
+        return " ".join(parts) or None
 
 
 app = Flask(__name__)
@@ -143,6 +151,20 @@ def _resolve_language(raw: object) -> str:
     if not isinstance(raw, str):
         raise ValueError(f"language must be a string, got {type(raw).__name__}")
     return validate_language(raw)
+
+
+# Clients send only the end of the previous segment's text; this bounds what
+# a request can make the server feed the model.
+_MAX_PROMPT_CHARS = 1000
+
+
+def _resolve_prompt(raw: object) -> str | None:
+    """The optional preceding-transcript context from stream metadata."""
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"prompt must be a string, got {type(raw).__name__}")
+    return raw[-_MAX_PROMPT_CHARS:]
 
 
 def _maybe_normalize(audio: np.ndarray) -> tuple[np.ndarray, float]:
@@ -188,6 +210,7 @@ def transcribe_audio_stream() -> ResponseReturnValue:
 
         try:
             language = _resolve_language(metadata.get("language"))
+            prompt = _resolve_prompt(metadata.get("prompt"))
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
@@ -217,7 +240,7 @@ def transcribe_audio_stream() -> ResponseReturnValue:
         text_result = _service.backend.transcribe(
             audio_np,
             language=language,
-            initial_prompt=_service.get_initial_prompt(),
+            initial_prompt=_service.get_initial_prompt(context=prompt),
         )
         asr_seconds = time.perf_counter() - t0
 
@@ -434,9 +457,10 @@ def main() -> None:
         socket_path.unlink()
 
     logger.info(f"Starting Talkat model server on {socket_path}")
-    # waitress serializes requests on a single thread by default, which keeps
-    # model/recognizer state safe without explicit locking. unix_socket_perms
-    # 0600 restricts the socket to the owning user.
+    # waitress handles requests on a small thread pool (4 threads by default).
+    # That's safe without locking: faster-whisper supports concurrent
+    # transcribe() calls, and Vosk builds a fresh recognizer per request.
+    # unix_socket_perms 0600 restricts the socket to the owning user.
     serve(app, unix_socket=str(socket_path), unix_socket_perms="0600")
 
 

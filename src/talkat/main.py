@@ -6,34 +6,36 @@ import os
 import signal
 import threading
 import time
-import traceback
-from collections.abc import Callable, Generator
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from types import FrameType, TracebackType
+from types import FrameType
 from typing import Any
 
 import httpx
 
+from .client import TranscriptionClient
 from .clipboard import copy_to_clipboard
 from .config import CODE_DEFAULTS, load_app_config, save_app_config
 from .diagnostics import build_record, write_record
 from .focus import get_focused_window
+from .keyboard import ModifierWatch
 from .logging_config import get_logger
 from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager
-from .record import AudioSession, AudioSessionError, calibrate_microphone
+from .record import StopReason, calibrate_microphone
 from .security import safe_subprocess_run, sanitize_text_for_typing
+from .session import DictationSession, SegmentResult, SessionOutcome
 
 logger = get_logger(__name__)
 
+# How long typing waits for held modifier keys to be released before handing
+# the rest of the transcript to the clipboard: long enough to ride out a
+# shortcut pressed mid-typing, short enough that a stuck key can't stall
+# delivery.
+MODIFIER_RELEASE_TIMEOUT_S = 5.0
 
-class TranscriptionUnreachable(RuntimeError):
-    """Server unreachable — connection refused, DNS failure, or request timeout."""
-
-
-class TranscriptionServerError(RuntimeError):
-    """Server returned an error (non-2xx, malformed JSON, etc.)."""
+UNTRANSCRIBED_NOTICE = "Part of the recording couldn't be transcribed (audio saved)"
 
 
 def get_transcript_dir() -> Path:
@@ -45,7 +47,7 @@ def get_transcript_dir() -> Path:
     return transcript_dir
 
 
-def save_transcript(text: str, mode: str = "short") -> Path:
+def save_transcript(text: str, mode: str = "dictation") -> Path:
     """Save transcript to a file with timestamp."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{timestamp}_{mode}.txt"
@@ -55,6 +57,13 @@ def save_transcript(text: str, mode: str = "short") -> Path:
         f.write(text + "\n")
 
     return filepath
+
+
+def _format_duration(seconds: float) -> str:
+    """Whole minutes read better in a toast; anything else stays in seconds."""
+    if seconds >= 60 and seconds % 60 < 0.5:
+        return f"{seconds / 60:g} min"
+    return f"{seconds:.0f}s"
 
 
 def _notify(message: str) -> None:
@@ -74,121 +83,6 @@ def _log_threshold_source(threshold: float) -> None:
         logger.info(f"Using threshold: {threshold:.1f} (from config)")
 
 
-class TranscriptionClient:
-    """Records a single utterance from the microphone and POSTs it to the model server."""
-
-    def __init__(self, config: dict[str, Any]):
-        self.config = config
-        self.socket_path: str = config.get("server_socket", CODE_DEFAULTS["server_socket"])
-        self.http_timeout: int = int(config.get("http_timeout", CODE_DEFAULTS["http_timeout"]))
-        self.threshold: float = float(
-            config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"])
-        )
-        self.silence_duration: float = float(
-            config.get("silence_duration", CODE_DEFAULTS["silence_duration"])
-        )
-        # Per-request language override sent in the stream metadata. The
-        # server has its own config default; we only send this if the client
-        # has one configured, so an older server build still works.
-        self.language: str | None = config.get("language")
-        # Server response metadata from the most recent transcribe call —
-        # audio duration, applied gain, ASR wall-clock. Populated after every
-        # ``transcribe_one_utterance``; old servers without these fields just
-        # leave the values at 0 / 0.0.
-        self.last_metadata: dict[str, float] = {
-            "audio_duration": 0.0,
-            "applied_gain_db": 0.0,
-            "asr_seconds": 0.0,
-        }
-        transport = httpx.HTTPTransport(uds=self.socket_path)
-        self._client = httpx.Client(transport=transport, timeout=self.http_timeout)
-
-    def close(self) -> None:
-        self._client.close()
-
-    def __enter__(self) -> "TranscriptionClient":
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        self.close()
-
-    def transcribe_one_utterance(
-        self,
-        stop_event: threading.Event | None = None,
-        max_duration: float | None = None,
-        debug: bool = False,
-        on_recording_started: Callable[[], None] | None = None,
-    ) -> str:
-        """
-        Record one utterance and return its transcription.
-
-        ``on_recording_started`` fires once the microphone stream is actually
-        open — the earliest moment speech is being captured. "Start speaking"
-        cues belong there; firing them earlier (before device setup, which
-        takes hundreds of ms) is how utterance beginnings get lost.
-
-        Returns the transcribed text (possibly empty if no speech detected).
-        Raises ``AudioSessionError`` on microphone failure, ``TranscriptionUnreachable``
-        if the server is unreachable, and ``TranscriptionServerError`` for other
-        server-side problems.
-        """
-        with AudioSession(
-            threshold=self.threshold,
-            silence_duration=self.silence_duration,
-            max_duration=max_duration,
-            stop_event=stop_event,
-            debug=debug,
-        ) as session:
-            if on_recording_started is not None:
-                on_recording_started()
-            metadata: dict[str, Any] = {"rate": session.sample_rate}
-            if self.language:
-                metadata["language"] = self.language
-
-            def body() -> Generator[bytes, None, None]:
-                yield json.dumps(metadata).encode("utf-8") + b"\n"
-                for chunk in session:
-                    if chunk:
-                        yield chunk
-
-            # The host part of the URL is ignored when using a unix-socket transport;
-            # only the path matters. We use a placeholder host purely for httpx hygiene.
-            try:
-                response = self._client.post("http://talkat/transcribe_stream", content=body())
-                response.raise_for_status()
-            except httpx.ConnectError as e:
-                raise TranscriptionUnreachable(
-                    f"Could not connect to the model server at {self.socket_path}. "
-                    "Ensure it's running: systemctl --user status talkat"
-                ) from e
-            except httpx.TimeoutException as e:
-                raise TranscriptionUnreachable(f"Request to model server timed out: {e}") from e
-            except httpx.HTTPError as e:
-                raise TranscriptionServerError(f"Error communicating with model server: {e}") from e
-
-            try:
-                payload = response.json()
-            except json.JSONDecodeError as e:
-                raise TranscriptionServerError(
-                    f"Could not decode JSON response from server: {response.text}"
-                ) from e
-
-            # Cache server-side metadata for diagnostics. Missing keys (older
-            # server build that pre-dates this) collapse to 0 — fine; the
-            # diagnostics record just shows zeros instead of crashing.
-            self.last_metadata = {
-                "audio_duration": float(payload.get("audio_duration", 0.0) or 0.0),
-                "applied_gain_db": float(payload.get("applied_gain_db", 0.0) or 0.0),
-                "asr_seconds": float(payload.get("asr_seconds", 0.0) or 0.0),
-            }
-            return str(payload.get("text", "")).strip()
-
-
 def _fetch_server_info(socket_path: str) -> tuple[str | None, str | None]:
     """Best-effort fetch of model_type / model_name from /health for diagnostics."""
     try:
@@ -203,35 +97,33 @@ def _fetch_server_info(socket_path: str) -> tuple[str | None, str | None]:
         return None, None
 
 
-def _set_stop_event_on_signal(stop_event: threading.Event) -> None:
+def _set_stop_event_on_signal(stop_event: threading.Event, abort_event: threading.Event) -> None:
     """
-    Install signal handlers for a graceful-then-forceful stop.
+    Install signal handlers for a graceful-then-forceful stop. Neither raises.
 
-    **First signal** (the toggle's SIGINT): set ``stop_event`` and return.
-    The capture loop polls the event between ~32 ms chunks, so the audio
-    stream ends cleanly, the in-flight ``/transcribe_stream`` request
-    completes, and the transcript is delivered. Raising here instead would
-    tear down the streaming POST mid-request and lose the recording — that
-    was the v1.0.0 toggle regression: every hotkey stop logged "Recording
-    interrupted." and typed nothing.
+    **First signal** (the toggle's SIGINT): set ``stop_event``. Capture ends
+    within one ~30 ms chunk, and everything recorded is still transcribed and
+    delivered. Raising here instead was the v1.0.0 toggle regression: every
+    hotkey stop tore down the request in flight and typed nothing.
 
-    **Second signal** (stop pressed again, or ``stop_process`` escalating to
-    SIGTERM after ``process_stop_timeout``): raise ``KeyboardInterrupt`` to
-    abort whatever the main thread is blocked on. This is the escape hatch
-    the raise exists for — PEP 475 auto-retries EINTR'd syscalls, so without
-    it a signal arriving while blocked on a hung server is silently
-    swallowed until ``http_timeout``. Raising from the handler propagates
-    via Python's standard exception path, async-signal-safe in the same way
-    the interpreter's built-in SIGINT handler is.
+    **Second signal** (``stop_process`` escalating to SIGTERM after
+    ``process_stop_timeout``, or Ctrl+C twice in a terminal — the stop hotkey
+    can't send one, its first press holds the lock while it waits): set
+    ``abort_event``. Typing stops between keystrokes, no new transcription
+    requests start, and audio not yet transcribed is saved (see
+    ``session.py``) — fast, since ``stop_process`` sends SIGKILL a second
+    later. This used to raise ``KeyboardInterrupt`` as an escape from a hung
+    server wait; the main thread no longer blocks on the server, and a raise
+    inside ``subprocess.run`` SIGKILLs ydotool mid-keystroke, leaving the key
+    held down.
 
     The handler does NO logging or cleanup — Python's logging module isn't
-    async-signal-safe and can deadlock if invoked from a handler. The main
-    loop observes the event and runs logging/cleanup itself.
+    async-signal-safe and can deadlock if invoked from a handler.
     """
 
     def handler(signum: int, frame: FrameType | None) -> None:
         if stop_event.is_set():
-            raise KeyboardInterrupt()
+            abort_event.set()
         stop_event.set()
 
     signal.signal(signal.SIGINT, handler)
@@ -255,21 +147,35 @@ def run_calibrate() -> int:
     return 0
 
 
-def listen_once(
+def run_dictation(
     output_file: str | None = None,
+    to_file: bool = False,
     config_overrides: dict[str, Any] | None = None,
     postprocess: str | None = None,
 ) -> int:
-    """Record one utterance and either type it (default) or save it to a file.
+    """Record until stopped and deliver the text — the one dictation route.
 
-    The caller (cli.py) is responsible for acquiring the listen process lock,
-    deciding to start vs. stop, and writing this process's PID into the PID
-    file under that lock. We only clean up on exit.
+    `talkat listen` toggles it: the first invocation records, the second stops
+    that one. cli.py owns the lock and the PID file; we only clean up on exit.
+    The recording is cut at natural pauses and each piece is transcribed in
+    the background while the microphone stays open (see ``session.py``).
 
-    When ``postprocess`` is set, the transcript is piped through the named
-    AIPP profile before output. AIPP is fail-open — a misconfigured profile
-    or unreachable LLM falls back to typing the raw transcript with a
-    notification, so the dictation is never lost.
+    Delivery:
+
+    * by default each piece is typed as soon as it's transcribed;
+    * with ``to_file``, pieces are appended to the transcript file as they
+      arrive and the whole transcript goes to the clipboard at the end,
+      typing nothing (long-form note taking);
+    * ``output_file`` on its own, ``postprocess`` (AIPP rewrites the whole
+      transcript), and ``output_mode: clipboard`` deliver once, at the end.
+
+    Recording ends when stopped, after ``idle_timeout`` without transcribed
+    speech (with a reminder every ``idle_notify_interval`` while it's quiet),
+    at ``max_recording_duration``, or once ``max_consecutive_errors`` pieces
+    in a row can't be transcribed.
+
+    AIPP is fail-open — a misconfigured profile or unreachable LLM falls back
+    to the raw transcript with a notification, so the dictation is never lost.
     """
     config = load_app_config()
     if config_overrides:
@@ -278,412 +184,420 @@ def listen_once(
     pm = ProcessManager("listen")
 
     stop_event = threading.Event()
-    _set_stop_event_on_signal(stop_event)
+    abort_event = threading.Event()
+    _set_stop_event_on_signal(stop_event, abort_event)
 
-    _log_threshold_source(
-        float(config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"]))
+    threshold = float(config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"]))
+    _log_threshold_source(threshold)
+
+    max_recording_duration = float(
+        config.get("max_recording_duration", CODE_DEFAULTS["max_recording_duration"])
     )
+    idle_timeout = float(config.get("idle_timeout", CODE_DEFAULTS["idle_timeout"]))
+    idle_notify_interval = float(
+        config.get("idle_notify_interval", CODE_DEFAULTS["idle_notify_interval"])
+    )
+    max_consecutive_errors = int(
+        config.get("max_consecutive_errors", CODE_DEFAULTS["max_consecutive_errors"])
+    )
+    output_mode = config.get("output_mode", CODE_DEFAULTS["output_mode"])
+    types_text = output_mode == "type" and not to_file and not output_file
 
     # The focus guard compares against the window focused at invocation time —
     # that's the window the user intends to dictate into.
     focus_before: str | None = None
-    if config.get("focus_guard", CODE_DEFAULTS["focus_guard"]):
+    if types_text and config.get("focus_guard", CODE_DEFAULTS["focus_guard"]):
         focus_before = get_focused_window()
+
+    # Type each piece the moment it's transcribed, unless the transcript has
+    # to be whole first (AIPP rewrites all of it).
+    typist = _Typist(focus_before, abort_event) if types_text and not postprocess else None
+
+    transcript_file: _TranscriptFile | None = None
+    if to_file:
+        transcript_file = _TranscriptFile(_transcript_path(output_file))
+        logger.info(f"Transcript will be saved to: {transcript_file.path}")
 
     def _announce_recording() -> None:
         logger.info("Recording — speak now. (Run 'talkat listen' again to stop.)")
         _notify('Recording... Run "talkat listen" again to stop')
 
-    server_metadata: dict[str, float] = {
-        "audio_duration": 0.0,
-        "applied_gain_db": 0.0,
-        "asr_seconds": 0.0,
-    }
-    try:
-        with TranscriptionClient(config) as client:
-            text = client.transcribe_one_utterance(
-                stop_event=stop_event,
-                debug=True,
-                on_recording_started=_announce_recording,
-            )
-            # ``last_metadata`` is set by the real client after each call;
-            # test stubs may not have it. Default to zeros so diagnostics
-            # still write a valid record.
-            server_metadata = getattr(client, "last_metadata", server_metadata)
-    except AudioSessionError as e:
-        logger.error(str(e))
-        _notify(f"Audio error: {e}")
+    def _announce_auto_stop(reason: StopReason | None) -> None:
+        # A recording that ends on its own must say so at once: someone who
+        # thinks they're still recording keeps talking, then reaches for the
+        # stop hotkey while the transcript is being typed.
+        if reason == "max_duration":
+            limit = _format_duration(max_recording_duration)
+            _notify(f"Recording hit the {limit} limit — transcribing.")
+        elif reason == "read_error":
+            _notify("Microphone error — transcribing what was recorded.")
+
+    def _announce_idle(idle_seconds: float) -> None:
+        # Silence is not a stop: say so, or a session left open looks dead.
+        quiet = _format_duration(idle_seconds)
+        logger.info(f"No speech for {quiet} — still recording.")
+        _notify(f'No speech for {quiet} — still dictating. Run "talkat listen" again to stop.')
+
+    failure_announced = False
+    consecutive_failures = 0
+
+    def on_result(result: SegmentResult) -> None:
+        nonlocal failure_announced, consecutive_failures
+        if result.failed:
+            consecutive_failures += 1
+            if not failure_announced:
+                failure_announced = True
+                where = (
+                    "the rest will go to the clipboard"
+                    if typist is not None
+                    else "see the transcript for where"
+                )
+                _notify(f"{UNTRANSCRIBED_NOTICE} — {where}.")
+            if consecutive_failures == max_consecutive_errors:
+                logger.error(
+                    f"Stopping: {consecutive_failures} pieces in a row couldn't be transcribed."
+                )
+                _notify(f"Dictation stopped: {consecutive_failures} transcription failures.")
+                stop_event.set()
+        else:
+            consecutive_failures = 0
+            if result.text:
+                logger.info(f"Recognized: {result.text}")
+        if transcript_file is not None:
+            transcript_file.add(result.text)
+        if typist is not None:
+            typist.add(result.text, transcribed=not result.failed)
+
+    session_start = time.monotonic()
+    with TranscriptionClient(config) as client:
+        outcome = DictationSession(
+            client,
+            threshold=threshold,
+            max_duration=max_recording_duration,
+            stop_event=stop_event,
+            abort_event=abort_event,
+            on_recording_started=_announce_recording,
+            on_recording_stopped=_announce_auto_stop,
+            debug=True,
+        ).run(
+            on_result,
+            idle_timeout=idle_timeout,
+            idle_notify_interval=idle_notify_interval,
+            on_idle=_announce_idle,
+        )
+
+    if outcome.audio_error is not None:
+        logger.error(str(outcome.audio_error))
+        _notify(f"Audio error: {outcome.audio_error}")
         pm.cleanup_pid_file()
         return 1
-    except TranscriptionUnreachable as e:
-        logger.error(str(e))
-        _notify("Error: Model server not reachable.")
-        pm.cleanup_pid_file()
-        return 1
-    except TranscriptionServerError as e:
-        logger.error(str(e))
-        _notify(f"Server communication error: {e}")
-        pm.cleanup_pid_file()
-        return 1
-    except KeyboardInterrupt:
-        logger.info("Recording interrupted.")
-        pm.cleanup_pid_file()
-        return 0
+    if outcome.idle_stopped:
+        _notify(f"Stopped: no speech for {_format_duration(idle_timeout)}.")
 
-    if not text:
-        logger.warning("No text recognized in the audio")
-        _notify("No text recognized")
-        pm.cleanup_pid_file()
-        return 0
+    complete = not outcome.failures
+    if transcript_file is not None:
+        text = _finish_transcript_file(transcript_file, config, postprocess, complete)
+    else:
+        text = outcome.text
+        if not text:
+            logger.warning("No text recognized in the audio")
+            _notify("No text recognized")
+            _write_session_diagnostics(config, "", outcome, postprocess, session_start)
+            pm.cleanup_pid_file()
+            return 0
 
-    logger.info(f"Recognized: {text}")
+        logger.info(f"Recognized: {text}")
+        if config.get("save_transcripts", True):
+            logger.info(f"Transcript saved to: {save_transcript(text)}")
 
-    if config.get("save_transcripts", True):
-        transcript_path = save_transcript(text, mode="short")
-        logger.info(f"Transcript saved to: {transcript_path}")
+        if typist is not None:
+            typist.finish()
+        else:
+            if postprocess and not complete:
+                # The LLM would rewrite the saved-audio markers.
+                logger.warning(f"Skipping post-processing: {UNTRANSCRIBED_NOTICE.lower()}.")
+            elif postprocess:
+                from .postprocess import postprocess_text
 
-    if postprocess:
+                text = postprocess_text(text, postprocess, config=config)
+            if output_file:
+                output_path = Path(output_file).expanduser()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(text, encoding="utf-8")
+                logger.info(f"Transcription saved to: {output_path}")
+                _notify(f"Saved to: {output_path.name}")
+            else:
+                _deliver_text(text, config, focus_before, abort_event, complete=complete)
+
+    _write_session_diagnostics(config, text, outcome, postprocess, session_start)
+    pm.cleanup_pid_file()
+    return 0 if complete else 1
+
+
+def _transcript_path(output_file: str | None) -> Path:
+    """Where --to-file appends: the given path, else a timestamped transcript."""
+    if output_file:
+        path = Path(output_file).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        path = get_transcript_dir() / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_dictation.txt"
+    path.touch()
+    return path
+
+
+class _TranscriptFile:
+    """Appends each piece to a transcript file as it arrives; nothing is typed.
+
+    The file is the source of truth — it never accumulates in memory, so a
+    session's length doesn't bound what we can record.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def add(self, piece: str) -> None:
+        if not piece:
+            return
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(piece + " ")
+
+    def read(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            logger.error(f"Could not read transcript: {e}")
+            return ""
+
+
+def _finish_transcript_file(
+    transcript_file: _TranscriptFile,
+    config: dict[str, Any],
+    postprocess: str | None,
+    complete: bool,
+) -> str:
+    """Wrap up a --to-file session: optional AIPP, clipboard, summary."""
+    full_text = transcript_file.read()
+    if not full_text:
+        logger.info("No transcript to save (no speech detected)")
+        _notify("Stopped. No speech detected.")
+        return ""
+
+    # End-of-session AIPP. Single LLM call on the full transcript so the model
+    # sees the whole context; the side-by-side .processed.txt keeps the raw
+    # file intact as the source of truth.
+    clipboard_text = full_text
+    if postprocess and not complete:
+        logger.warning(f"Skipping post-processing: {UNTRANSCRIBED_NOTICE.lower()}.")
+    elif postprocess:
         from .postprocess import postprocess_text
 
-        text = postprocess_text(text, postprocess, config=config)
-        # postprocess_text fails open — text is the AIPP output on success,
-        # the original transcript on failure. Either way it's typable.
+        processed = postprocess_text(full_text, postprocess, config=config)
+        if processed and processed != full_text:
+            processed_path = transcript_file.path.with_suffix(".processed.txt")
+            try:
+                processed_path.write_text(processed, encoding="utf-8")
+                logger.info(f"Post-processed transcript saved to: {processed_path}")
+                clipboard_text = processed
+            except OSError as e:
+                logger.error(f"Could not write processed transcript: {e}")
 
-    if output_file:
-        output_path = Path(output_file).expanduser()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(text, encoding="utf-8")
-        logger.info(f"Transcription saved to: {output_path}")
-        _notify(f"Saved to: {output_path.name}")
+    words = len(full_text.split())
+    logger.info(f"Full transcript saved to: {transcript_file.path} ({words} words)")
+    if copy_to_clipboard(clipboard_text):
+        _notify(f"Stopped. {words} words copied to clipboard.")
     else:
-        _deliver_text(text, config, focus_before)
-
-    _write_diagnostics_for_listen(
-        config=config,
-        mode="listen",
-        text=text,
-        server_metadata=server_metadata,
-        postprocess=postprocess,
-    )
-
-    pm.cleanup_pid_file()
-    return 0
+        logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
+        _notify(f"Stopped. {words} words saved to {transcript_file.path.name}.")
+    return full_text
 
 
-def _deliver_text(text: str, config: dict[str, Any], focus_before: str | None) -> None:
-    """Deliver the transcript: type it into the focused window, else clipboard.
+def _deliver_text(
+    text: str,
+    config: dict[str, Any],
+    focus_before: str | None,
+    abort_event: threading.Event | None = None,
+    *,
+    complete: bool = True,
+) -> None:
+    """Deliver a whole transcript at once: type it into the focused window, else clipboard.
 
-    The invariant this function maintains: the transcript is never silently
-    lost. Every failure path lands it in the clipboard or, failing that, on
-    stdout — with a notification saying where it went.
+    The invariant: the transcript is never silently lost. Whatever can't be
+    typed lands in the clipboard or, failing that, on stdout — with a
+    notification saying where it went. ``complete=False`` (part of the
+    recording couldn't be transcribed) is never typed: it goes to the
+    clipboard with its saved-audio markers.
     """
     if config.get("output_mode", CODE_DEFAULTS["output_mode"]) == "clipboard":
         if copy_to_clipboard(text):
             logger.info(f"Copied to clipboard: {text}")
-            _notify(f"Copied: {text[:100]}")
+            if complete:
+                _notify(f"Copied: {text[:100]}")
+            else:
+                _notify(f"{UNTRANSCRIBED_NOTICE} — transcript copied to clipboard.")
         else:
             logger.warning("Clipboard unavailable (wl-copy/xclip missing), printing instead:")
             print(f"TEXT: {text}")
             _notify(f"Recognized: {text[:100]}")
         return
 
-    # Focus guard: if the user switched windows while dictating, typing would
-    # splatter the transcript into the wrong app. Both sides must be known to
-    # conclude "changed" — an IPC failure disables the guard, not typing.
-    if focus_before is not None:
-        focus_now = get_focused_window()
-        if focus_now is not None and focus_now != focus_before:
-            logger.warning(
-                f"Focused window changed during dictation ({focus_before} -> {focus_now}); "
-                "not typing into it."
-            )
-            if copy_to_clipboard(text):
-                _notify("Focus changed — transcript copied to clipboard.")
-            else:
-                print(f"TEXT: {text}")
-                _notify("Focus changed — transcript printed to console.")
+    typist = _Typist(focus_before, abort_event or threading.Event())
+    typist.add(text, transcribed=complete)
+    typist.finish()
+
+
+class _Typist:
+    """Types a transcript into the focused window, piece by piece as it arrives.
+
+    Once typing has to stop — focus moved, a modifier key stayed held, a
+    second stop, ydotool failed, or a piece couldn't be transcribed — nothing
+    more is typed, and :meth:`finish` puts everything untyped on the clipboard.
+    """
+
+    def __init__(self, focus_before: str | None, abort_event: threading.Event) -> None:
+        self._focus_before = focus_before
+        self._abort_event = abort_event
+        self._typed = ""
+        self._untyped = ""
+        self.stop_reason: str | None = None
+
+    def add(self, piece: str, transcribed: bool = True) -> None:
+        # No length cap: the recording limit already bounds a transcript, and
+        # sanitize's default cap would silently drop the end of a long one.
+        piece = sanitize_text_for_typing(piece, max_length=len(piece)).strip()
+        if not piece:
+            return
+        if self._typed or self._untyped:
+            piece = " " + piece
+        if not transcribed and self.stop_reason is None:
+            # Typing on past a gap would leave text with a hole in it.
+            self.stop_reason = UNTRANSCRIBED_NOTICE
+        if self.stop_reason is not None:
+            self._untyped += piece
+            return
+        typed, reason = _type_text(piece, self._focus_before, self._abort_event)
+        self._typed += piece[:typed]
+        if reason is not None:
+            self.stop_reason = reason
+            self._untyped += piece[typed:]
+
+    def finish(self) -> None:
+        """Report the result; put whatever wasn't typed on the clipboard."""
+        # Pasted right after typed text, the untyped part needs its leading space.
+        rest = self._untyped if self._typed else self._untyped.lstrip()
+        if not rest.strip():
+            logger.info(f"Typed: {self._typed}")
+            _notify(f"Typed: {self._typed[:100]}")
             return
 
-    try:
-        safe_text = sanitize_text_for_typing(text)
-        # timeout=None: typing a long transcript with --key-delay=1 can take
-        # well over the default 30s.
-        safe_subprocess_run(
-            ["ydotool", "type", "--key-delay=1", safe_text],
-            check=True,
-            timeout=None,
-        )
-        logger.info(f"Typed: {text}")
-        _notify(f"Typed: {text[:100]}")
-    except Exception as e:
-        # Typing fails in many ways — ydotool missing, ydotoold not running,
-        # a crash mid-type. The transcript must survive all of them.
-        logger.warning(f"Typing failed ({e}); falling back to clipboard.")
-        if copy_to_clipboard(text):
-            _notify("Typing failed — transcript copied to clipboard.")
+        reason = self.stop_reason or "typing stopped"
+        logger.warning(f"Typing stopped after {len(self._typed)} characters: {reason}.")
+        what = "the rest" if self._typed else "the transcript"
+        headline = reason[:1].upper() + reason[1:]
+        if copy_to_clipboard(rest):
+            _notify(f"{headline} — {what} copied to clipboard.")
         else:
-            print(f"TEXT: {text}")
-            _notify(f"Recognized: {text[:100]}")
+            print(f"TEXT: {rest}")
+            _notify(f"{headline} — {what} printed to the console (no clipboard tool).")
 
 
-def _write_diagnostics_for_listen(
-    *,
+def _type_text(
+    text: str, focus_before: str | None, abort_event: threading.Event
+) -> tuple[int, str | None]:
+    """Type ``text`` with one ydotool call per keystroke.
+
+    Returns how many characters were consumed and, if typing stopped early,
+    why (``None`` once all of it is typed).
+
+    One call per character is what lets the modifier guard work. ydotoold's
+    virtual keyboard shares the seat's modifier state, so while Super is
+    physically held every typed letter is a compositor shortcut — on niri,
+    typing " off of the tool if they" with Super down opened six launchers
+    and three terminals. Checking before each keystroke confines a badly
+    timed press to the one key already in flight.
+
+    Focus is re-checked at each word boundary and after any modifier wait
+    (the shortcut may have moved it). Both sides must be known to conclude
+    "changed" — an IPC failure disables the guard, not typing.
+    """
+    with ModifierWatch() as modifiers:
+        check_focus = True
+        for i, char in enumerate(text):
+            if abort_event.is_set():
+                return i, "stopped"
+            if modifiers.held():
+                logger.info("Modifier key held — typing paused until it's released.")
+                if not modifiers.wait_released(MODIFIER_RELEASE_TIMEOUT_S):
+                    return i, "a modifier key stayed held"
+                check_focus = True
+            if check_focus and focus_before is not None:
+                focus_now = get_focused_window()
+                if focus_now is not None and focus_now != focus_before:
+                    logger.warning(
+                        f"Focused window changed during dictation ({focus_before} -> {focus_now})."
+                    )
+                    return i, "focus changed"
+            check_focus = char.isspace()
+            if not char.isascii():
+                # ydotool 1.0.x indexes its ASCII keymap with a signed char,
+                # so any other byte reads outside the table. Never send one.
+                continue
+            try:
+                # --escape=0: typed on its own, "\" would start an escape
+                # sequence and never appear.
+                safe_subprocess_run(["ydotool", "type", "--escape=0", "--", char], check=True)
+            except Exception as e:
+                # ydotool missing, ydotoold not running, a crash mid-type.
+                logger.warning(f"Typing failed: {e}")
+                return i, "typing failed (ydotool error)"
+    return len(text), None
+
+
+def _write_session_diagnostics(
     config: dict[str, Any],
-    mode: str,
     text: str,
-    server_metadata: dict[str, float],
+    outcome: SessionOutcome | None,
     postprocess: str | None,
+    session_start: float,
 ) -> None:
-    """Build + write a diagnostics record for an interactive dictation run.
+    """Build + write one diagnostics record for a dictation session.
 
     Diagnostics are advisory: any failure inside is swallowed so the user
     never loses dictation because a JSON write hit ENOSPC or similar.
     """
     try:
+        results = outcome.results if outcome is not None else []
+        transcribed = [r for r in results if not r.failed]
+        gains = [
+            r.server_metadata["applied_gain_db"]
+            for r in transcribed
+            if r.server_metadata.get("applied_gain_db")
+        ]
         socket_path = config.get("server_socket", CODE_DEFAULTS["server_socket"])
         model_type, model_name = _fetch_server_info(socket_path)
         record = build_record(
-            mode=mode,
-            audio_duration=server_metadata.get("audio_duration", 0.0),
-            asr_seconds=server_metadata.get("asr_seconds", 0.0),
-            applied_gain_db=server_metadata.get("applied_gain_db", 0.0),
+            mode="dictation",
+            audio_duration=sum(r.server_metadata.get("audio_duration", 0.0) for r in transcribed),
+            asr_seconds=sum(r.server_metadata.get("asr_seconds", 0.0) for r in transcribed),
+            applied_gain_db=sum(gains) / len(gains) if gains else 0.0,
             model_type=model_type,
             model_name=model_name,
             transcript_chars=len(text),
-            transcript_words=len(text.split()) if text else 0,
+            transcript_words=len(text.split()),
             postprocess_profile=postprocess,
+            errors=[f"segment {r.index}: {r.error}" for r in results if r.failed],
+            extra={
+                "recording_seconds": round(sum(r.seconds for r in results), 3),
+                "segments": len(results),
+                "untranscribed_segments": len(results) - len(transcribed),
+                "cuts": dict(Counter(r.cut for r in results)),
+                "stop_reason": outcome.stop_reason if outcome is not None else None,
+                "aborted": outcome.aborted if outcome is not None else False,
+                "idle_stopped": outcome.idle_stopped if outcome is not None else False,
+                "session_seconds": round(time.monotonic() - session_start, 3),
+            },
         )
         path = write_record(record)
         if path:
             logger.debug(f"Diagnostics written to: {path}")
     except Exception as e:  # noqa: BLE001 — diagnostics must never block dictation
         logger.debug(f"Diagnostics skipped (non-fatal): {e}")
-
-
-def listen_continuous(
-    output_file: str | None = None,
-    background: bool = False,
-    clipboard: bool = True,
-    config_overrides: dict[str, Any] | None = None,
-    postprocess: str | None = None,
-) -> int:
-    """Run continuous dictation: loop transcribing utterances until interrupted.
-
-    When ``postprocess`` is set, the AIPP profile is applied **once at end of
-    session** to the concatenated transcript (not per utterance). This is
-    deliberate — running an LLM on each utterance loses cross-utterance
-    context and multiplies cost N times. The processed result is written
-    alongside the raw transcript as ``<name>.processed.txt`` and copied to
-    the clipboard. The raw transcript file is kept as the source of truth.
-    """
-    config = load_app_config()
-    if config_overrides:
-        config.update(config_overrides)
-
-    pm = ProcessManager("long_dictation")
-    _, existing_pid = pm.is_running()
-    if existing_pid != os.getpid():
-        pm.write_pid(os.getpid())
-
-    stop_event = threading.Event()
-    _set_stop_event_on_signal(stop_event)
-
-    _log_threshold_source(
-        float(config.get("silence_threshold", CODE_DEFAULTS["silence_threshold"]))
-    )
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if output_file:
-        transcript_path = Path(output_file).expanduser()
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        transcript_filename = transcript_path.name
-    else:
-        transcript_filename = f"{timestamp}_long.txt"
-        transcript_path = get_transcript_dir() / transcript_filename
-    transcript_path.touch()
-
-    if background:
-        logger.info("Starting long dictation mode (background).")
-        _notify("Long dictation started. Run 'talkat toggle-long' to stop.")
-    else:
-        logger.info("Starting long dictation mode. Press Ctrl+C to stop.")
-        _notify("Long dictation mode started. Press Ctrl+C to stop.")
-    logger.info(f"Transcript will be saved to: {transcript_path}")
-    if clipboard:
-        logger.info("Transcript will be copied to clipboard when finished.")
-
-    silence_timeout = float(
-        config.get("long_mode_silence_timeout", CODE_DEFAULTS["long_mode_silence_timeout"])
-    )
-    max_session_duration = float(
-        config.get(
-            "long_mode_max_session_duration",
-            CODE_DEFAULTS["long_mode_max_session_duration"],
-        )
-    )
-    max_consecutive_errors = int(
-        config.get(
-            "long_mode_max_consecutive_errors",
-            CODE_DEFAULTS["long_mode_max_consecutive_errors"],
-        )
-    )
-
-    # We append each segment straight to disk and never accumulate the full
-    # transcript in memory. The final clipboard copy reads the file back, so
-    # memory stays bounded regardless of session length.
-    session_word_count = 0
-    consecutive_errors = 0
-    return_code = 0
-    session_start = time.monotonic()
-    last_speech_at = session_start
-
-    # Diagnostics aggregates across the whole long-mode session — one record
-    # per session, not per utterance. Per-utterance would be diagnostics spam.
-    diag_audio_duration = 0.0
-    diag_asr_seconds = 0.0
-    diag_gain_samples: list[float] = []
-    diag_errors: list[str] = []
-
-    try:
-        with TranscriptionClient(config) as client:
-            while not stop_event.is_set():
-                now = time.monotonic()
-                if now - session_start > max_session_duration:
-                    logger.info(
-                        f"Reached max session duration "
-                        f"({max_session_duration / 60:.0f} min), stopping."
-                    )
-                    break
-                if now - last_speech_at > silence_timeout:
-                    logger.info(f"No speech for {silence_timeout:.0f}s, stopping.")
-                    break
-
-                # Cap each utterance attempt at the silence timeout so the loop
-                # wakes up to re-check session/silence limits between attempts.
-                try:
-                    text = client.transcribe_one_utterance(
-                        stop_event=stop_event,
-                        max_duration=silence_timeout,
-                        debug=False,
-                    )
-                    consecutive_errors = 0
-                    metadata = getattr(client, "last_metadata", {})
-                    diag_audio_duration += metadata.get("audio_duration", 0.0)
-                    diag_asr_seconds += metadata.get("asr_seconds", 0.0)
-                    gain = metadata.get("applied_gain_db", 0.0)
-                    if gain:
-                        diag_gain_samples.append(gain)
-                except TranscriptionUnreachable as e:
-                    logger.error(str(e))
-                    _notify("Error: Model server not reachable.")
-                    diag_errors.append(f"unreachable: {e}")
-                    return_code = 1
-                    break
-                except TranscriptionServerError as e:
-                    logger.error(str(e))
-                    if stop_event.is_set():
-                        break
-                    consecutive_errors += 1
-                    diag_errors.append(f"server_error: {e}")
-                    if consecutive_errors >= max_consecutive_errors:
-                        logger.error(
-                            f"Aborting long dictation after "
-                            f"{consecutive_errors} consecutive server errors."
-                        )
-                        _notify(
-                            f"Long dictation aborted: "
-                            f"{consecutive_errors} consecutive server errors."
-                        )
-                        return_code = 1
-                        break
-                    continue
-                except AudioSessionError as e:
-                    logger.error(f"Audio error: {e}")
-                    diag_errors.append(f"audio: {e}")
-                    return_code = 1
-                    break
-
-                if text:
-                    logger.info(f"Recognized: {text}")
-                    session_word_count += len(text.split())
-                    last_speech_at = time.monotonic()
-                    with open(transcript_path, "a", encoding="utf-8") as f:
-                        f.write(text + " ")
-    except KeyboardInterrupt:
-        # Raised from our SIGINT/SIGTERM handler to interrupt blocking I/O.
-        logger.info("Long dictation interrupted.")
-    except Exception as e:
-        logger.error(f"Error in long dictation mode: {e}")
-        traceback.print_exc()
-        return_code = 1
-    finally:
-        logger.info("Cleaning up long dictation session...")
-
-        try:
-            full_text = transcript_path.read_text(encoding="utf-8").strip()
-        except OSError as e:
-            logger.error(f"Could not read transcript for final summary: {e}")
-            full_text = ""
-
-        if full_text:
-            word_count = len(full_text.split()) or session_word_count
-
-            # End-of-session AIPP (if requested). Single LLM call on the full
-            # transcript so the model sees the whole context. Side-by-side
-            # .processed.txt keeps the raw file intact as source of truth.
-            clipboard_text = full_text
-            if postprocess:
-                from .postprocess import postprocess_text
-
-                processed = postprocess_text(full_text, postprocess, config=config)
-                if processed and processed != full_text:
-                    processed_path = transcript_path.with_suffix(".processed.txt")
-                    try:
-                        processed_path.write_text(processed, encoding="utf-8")
-                        logger.info(f"Post-processed transcript saved to: {processed_path}")
-                        clipboard_text = processed
-                    except OSError as e:
-                        logger.error(f"Could not write processed transcript: {e}")
-
-            clipboard_ok = clipboard and copy_to_clipboard(clipboard_text)
-            if clipboard and not clipboard_ok:
-                logger.warning("Could not copy to clipboard (wl-copy or xclip not available)")
-            logger.info(f"Full transcript saved to: {transcript_path}")
-            logger.info(f"Total words: {word_count}")
-            if clipboard_ok:
-                _notify(f"Stopped. {word_count} words copied to clipboard.")
-            else:
-                _notify(f"Stopped. {word_count} words saved to {transcript_filename}.")
-        else:
-            logger.info("No transcript to save (no speech detected)")
-            _notify("Stopped. No speech detected.")
-
-        try:
-            socket_path = config.get("server_socket", CODE_DEFAULTS["server_socket"])
-            model_type, model_name = _fetch_server_info(socket_path)
-            mean_gain = (
-                sum(diag_gain_samples) / len(diag_gain_samples) if diag_gain_samples else 0.0
-            )
-            record = build_record(
-                mode="long",
-                audio_duration=diag_audio_duration,
-                asr_seconds=diag_asr_seconds,
-                applied_gain_db=mean_gain,
-                model_type=model_type,
-                model_name=model_name,
-                transcript_chars=len(full_text),
-                transcript_words=len(full_text.split()) if full_text else session_word_count,
-                postprocess_profile=postprocess,
-                errors=diag_errors,
-                extra={
-                    "session_seconds": round(time.monotonic() - session_start, 3),
-                    "utterances_with_gain_boost": len(diag_gain_samples),
-                },
-            )
-            write_record(record)
-        except Exception as e:  # noqa: BLE001 — diagnostics never block dictation
-            logger.debug(f"Long-mode diagnostics skipped (non-fatal): {e}")
-
-        pm.cleanup_pid_file()
-
-    return return_code

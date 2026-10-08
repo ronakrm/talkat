@@ -1,7 +1,7 @@
 """Tests for the §5b language config — validator, plumbing, CLI flag, integration.
 
 §5b makes ``language`` a first-class config knob, with a CLI flag on
-``listen``/``long``/``file``/``batch`` and per-request override in the
+``listen``/``file``/``batch`` and per-request override in the
 stream metadata + file-upload form data. Coverage lives in one file so
 the language behavior is easy to find.
 
@@ -20,7 +20,6 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-import numpy as np
 import pytest
 from flask import Flask, jsonify, request
 from waitress.server import create_server
@@ -95,7 +94,7 @@ def test_validate_json_config_rejects_bad_language():
 
 
 def test_transcription_client_reads_language_from_config():
-    from talkat.main import TranscriptionClient
+    from talkat.client import TranscriptionClient
 
     client = TranscriptionClient({"server_socket": "/tmp/talkat-test.sock", "language": "fr"})
     try:
@@ -107,7 +106,7 @@ def test_transcription_client_reads_language_from_config():
 def test_transcription_client_language_is_none_when_unset():
     """An empty config (no language key) means the client sends no language;
     server applies its own default. This preserves wire-compat with older clients."""
-    from talkat.main import TranscriptionClient
+    from talkat.client import TranscriptionClient
 
     client = TranscriptionClient({"server_socket": "/tmp/talkat-test.sock"})
     try:
@@ -158,11 +157,11 @@ def test_resolve_language_raises_on_non_string():
 
 
 # ---------------------------------------------------------------------------
-# CLI flag — present on listen / long / file / batch + plumbed via overrides
+# CLI flag — present on listen / file / batch + plumbed via overrides
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("subcommand", ["listen", "long", "file", "batch"])
+@pytest.mark.parametrize("subcommand", ["listen", "file", "batch"])
 def test_language_flag_present_on_subcommand(subcommand: str):
     """Just running ``--help`` would be the cleanest check but invokes sys.exit.
     We exercise the argparse object built inside cli.main by stubbing sys.argv
@@ -182,10 +181,7 @@ def test_language_flag_present_on_subcommand(subcommand: str):
 
     # We don't want the actual dispatch to run — stub every subcommand sink
     # so main() returns cleanly regardless of which one argparse picks.
-    def fake_listen_once(**_kw: object) -> int:
-        return 0
-
-    def fake_listen_continuous(**_kw: object) -> int:
+    def fake_run_dictation(**_kw: object) -> int:
         return 0
 
     def fake_file(*_a: object, **_kw: object) -> int:
@@ -201,8 +197,7 @@ def test_language_flag_present_on_subcommand(subcommand: str):
     import talkat.main as main_mod
 
     monkeypatch_attrs = [
-        (main_mod, "listen_once", fake_listen_once),
-        (main_mod, "listen_continuous", fake_listen_continuous),
+        (main_mod, "run_dictation", fake_run_dictation),
         (fp_mod, "process_audio_file_command", fake_file),
         (fp_mod, "batch_process_files", fake_batch),
     ]
@@ -286,53 +281,6 @@ def test_overrides_from_args_omits_unset_language():
 # ---------------------------------------------------------------------------
 
 
-SAMPLES_PER_CHUNK = 480
-
-
-def _silent_chunk() -> bytes:
-    return np.zeros(SAMPLES_PER_CHUNK, dtype=np.int16).tobytes()
-
-
-def _loud_chunk() -> bytes:
-    return np.full(SAMPLES_PER_CHUNK, 5000, dtype=np.int16).tobytes()
-
-
-class _FakeStream:
-    def __init__(self, chunks: list[bytes]) -> None:
-        self.queue = list(chunks)
-
-    def read(self, n_samples: int, exception_on_overflow: bool = False) -> bytes:
-        if self.queue:
-            return self.queue.pop(0)
-        return _silent_chunk()
-
-    def stop_stream(self) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
-
-
-class _FakePyAudio:
-    _next_chunks: list[bytes] = []
-
-    def open(self, **_kwargs: object) -> _FakeStream:
-        return _FakeStream(type(self)._next_chunks)
-
-    def terminate(self) -> None:
-        pass
-
-
-@pytest.fixture
-def patched_audio(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[_FakePyAudio]]:
-    from talkat import record as record_mod
-
-    monkeypatch.setattr(record_mod.pyaudio, "PyAudio", _FakePyAudio)
-    monkeypatch.setattr(record_mod, "find_microphone", lambda p, preferred_name=None: 0)
-    _FakePyAudio._next_chunks = [_loud_chunk()] * 3 + [_silent_chunk()] * 30
-    yield _FakePyAudio
-
-
 def _wait_for_socket(socket_path: Path, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -372,43 +320,32 @@ def language_capturing_server(tmp_path: Path) -> Iterator[tuple[str, dict[str, o
 
 
 def test_client_sends_language_in_stream_metadata(
-    patched_audio, language_capturing_server: tuple[str, dict[str, object]]
+    language_capturing_server: tuple[str, dict[str, object]],
 ):
     """When the client config has ``language``, it appears in the JSON metadata line."""
-    from talkat.main import TranscriptionClient
+    from talkat.client import TranscriptionClient
 
     socket_path, captured = language_capturing_server
-    config = {
-        "server_socket": socket_path,
-        "http_timeout": 5,
-        "silence_threshold": 200.0,
-        "silence_duration": 0.2,
-        "language": "fr",
-    }
+    config = {"server_socket": socket_path, "http_timeout": 5, "language": "fr"}
     with TranscriptionClient(config) as client:
-        client.transcribe_one_utterance(max_duration=0.5)
+        client.transcribe_audio(b"\x00\x00" * 1600)
 
     assert captured["metadata"] == {"rate": 16000, "language": "fr"}
 
 
 def test_client_omits_language_when_unset(
-    patched_audio, language_capturing_server: tuple[str, dict[str, object]]
+    language_capturing_server: tuple[str, dict[str, object]],
 ):
     """No ``language`` key in config → no ``language`` field in metadata.
 
     Wire-compat for older clients (and a clean way to defer to the server's
     own default without sending an explicit value).
     """
-    from talkat.main import TranscriptionClient
+    from talkat.client import TranscriptionClient
 
     socket_path, captured = language_capturing_server
-    config = {
-        "server_socket": socket_path,
-        "http_timeout": 5,
-        "silence_threshold": 200.0,
-        "silence_duration": 0.2,
-    }
+    config = {"server_socket": socket_path, "http_timeout": 5}
     with TranscriptionClient(config) as client:
-        client.transcribe_one_utterance(max_duration=0.5)
+        client.transcribe_audio(b"\x00\x00" * 1600)
 
     assert captured["metadata"] == {"rate": 16000}

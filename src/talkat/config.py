@@ -19,8 +19,10 @@ logger = get_logger(__name__)
 # 1. CODE DEFAULTS
 CODE_DEFAULTS: dict[str, Any] = {
     # Audio and Recognition Settings
+    # Calibrated speech level (`talkat calibrate`). It decides where the
+    # segmenter cuts the recording into transcription pieces — never what is
+    # sent, and no longer whether a recording stops.
     "silence_threshold": 200.0,
-    "silence_duration": 3.0,  # Seconds of silence before stopping recording
     "silence_threshold_fallback": 500.0,  # Fallback threshold when auto-detection fails
     "silence_threshold_min": 50.0,  # Minimum allowed silence threshold
     "silence_threshold_max": 5000.0,  # Maximum allowed silence threshold
@@ -28,13 +30,18 @@ CODE_DEFAULTS: dict[str, Any] = {
     # "pipewire", "headset"). None = use the system default input device.
     "input_device_name": None,
     # Recording Timeouts and Durations
-    "max_recording_duration": 30.0,  # Max duration for short recordings (seconds)
-    # Long mode auto-stops after this much continuous silence (no speech detected).
-    "long_mode_silence_timeout": 60.0,
-    # Hard cap on a single long-mode session.
-    "long_mode_max_session_duration": 1800.0,  # 30 minutes
-    # Trip the long-mode circuit breaker after this many consecutive server errors.
-    "long_mode_max_consecutive_errors": 5,
+    # Hard cap on one recording (seconds): a safety net for a mic left open,
+    # not a usage limit — at 30 s it cut long dictation off mid-sentence.
+    # `talkat listen` otherwise records until you toggle it off.
+    "max_recording_duration": 600.0,
+    # Stop once no speech has been transcribed for this long ...
+    "idle_timeout": 60.0,
+    # ... having said so every this often while it's quiet, so a session left
+    # open doesn't look dead.
+    "idle_notify_interval": 30.0,
+    # Stop after this many pieces in a row can't be transcribed (their audio
+    # is saved either way).
+    "max_consecutive_errors": 5,
     # Server Configuration
     "server_socket": str(SOCKET_FILE),  # Unix domain socket path for the model server
     # Network Timeouts (apply to local unix-socket requests)
@@ -54,12 +61,14 @@ CODE_DEFAULTS: dict[str, Any] = {
     "max_segment_seconds": 480.0,  # 8 minutes — well under any single-pass cliff
     # Process Management Timeouts
     # The stop wait must cover the work a listen process legitimately does
-    # AFTER the stop signal: finish the stream, wait for ASR (~a quarter of
-    # the audio length), type the text. The poll returns the moment the
-    # process exits, so the common case doesn't feel this ceiling — but
-    # hitting it escalates to SIGTERM, which force-aborts and drops the
-    # transcript.
-    "process_stop_timeout": 20.0,
+    # AFTER the stop signal. Typing as you talk leaves little: the last
+    # segment's ASR and typing. The ceiling is sized for a max-length
+    # recording delivered at once (--postprocess): the LLM call plus ~22 ms
+    # per typed character, ~2.5 min for 10 min of speech. The poll returns the
+    # moment the process exits, so the common case doesn't feel this ceiling —
+    # but hitting it escalates to SIGTERM, which aborts: untyped text goes to
+    # the clipboard and untranscribed audio is saved.
+    "process_stop_timeout": 300.0,
     "lock_acquire_timeout": 1.0,  # Max time to wait for lock acquisition
     "lock_retry_interval": 0.01,  # Sleep interval between lock acquisition attempts
     "process_check_interval": 0.1,  # Sleep interval when checking process status
@@ -78,7 +87,6 @@ CODE_DEFAULTS: dict[str, Any] = {
     # Vosk ignores this (language is baked into the loaded model).
     "language": "en",
     # Application Features
-    "clipboard_on_long": True,
     "save_transcripts": True,
     "transcript_dir": str(TRANSCRIPT_DIR),
     # Where listen-mode output goes: "type" (ydotool into the focused

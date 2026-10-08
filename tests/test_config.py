@@ -22,10 +22,9 @@ def test_save_load_round_trip(clean_config_file):
     """Values saved via save_app_config are returned by load_app_config."""
     to_save = {
         "model_type": "vosk",
-        "clipboard_on_long": False,
         "save_transcripts": False,
         "http_timeout": 60,
-        "silence_duration": 2.5,
+        "idle_timeout": 120.0,
     }
     save_app_config(to_save)
 

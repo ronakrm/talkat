@@ -39,6 +39,8 @@ DATA_DIR = XDG_DATA_HOME / APP_NAME
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 LOG_DIR = DATA_DIR / "logs"
 DIAGNOSTICS_DIR = DATA_DIR / "diagnostics"
+# Audio that couldn't be transcribed during dictation, kept for `talkat file`.
+UNTRANSCRIBED_DIR = DATA_DIR / "untranscribed"
 
 # Runtime directories.
 # TALKAT_RUNTIME_DIR relocates the whole runtime dir — server socket, PID

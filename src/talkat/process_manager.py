@@ -1,18 +1,17 @@
-"""Process management for Talkat with proper locking and signal handling."""
+"""Process management for Talkat: the listen lock, its PID file, and stopping it."""
 
 import contextlib
 import fcntl
 import os
 import signal
-import subprocess
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import FrameType, TracebackType
-from typing import IO, Self
+from typing import Self
 
 from .logging_config import get_logger
-from .paths import LOCK_DIR, LOG_DIR, PID_DIR
+from .paths import LOCK_DIR, PID_DIR
 
 logger = get_logger(__name__)
 
@@ -279,106 +278,6 @@ class ProcessManager:
         except Exception as e:
             logger.error(f"Error stopping process: {e}")
             return False
-
-    def start_background_process(
-        self, cmd: list[str], debug: bool = False, env: dict | None = None
-    ) -> int | None:
-        """
-        Start a background process with proper signal handling.
-
-        Atomicity: the child is spawned, then its PID is written to the PID
-        file. If the write fails the child is killed so we never leak an
-        unsupervised process. The window between Popen returning and write_pid
-        is small (microseconds) but is also covered by the child's own
-        self-registration in listen_continuous as a defence-in-depth measure.
-
-        Args:
-            cmd: Command and arguments to run
-            debug: If True, redirect output to log files instead of DEVNULL
-            env: Optional environment variables to pass to the process
-
-        Returns:
-            PID of started process, or None on failure (child is killed if the
-            failure happens after Popen).
-        """
-        log_handle: IO[str] | None = None
-        try:
-            if debug:
-                LOG_DIR.mkdir(parents=True, exist_ok=True)
-                log_file = LOG_DIR / f"{self.process_name}_debug.log"
-                logger.info(f"Debug mode: output will be written to {log_file}")
-                log_handle = open(log_file, "a")
-                stdout: int | IO[str] = log_handle
-                stderr: int | IO[str] = log_handle
-            else:
-                stdout = subprocess.DEVNULL
-                stderr = subprocess.DEVNULL
-
-            process = subprocess.Popen(
-                cmd,
-                stdout=stdout,
-                stderr=stderr,
-                env=env,
-                start_new_session=True,
-                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
-            )
-
-            pid = process.pid
-            try:
-                self.write_pid(pid)
-            except PIDWriteError:
-                # The child is running but we couldn't record its PID — that
-                # would leave an orphan. Kill it so the user can retry from a
-                # clean state.
-                logger.error(f"Could not record PID for child {pid}; terminating it")
-                with contextlib.suppress(Exception):
-                    process.kill()
-                    process.wait(timeout=2)
-                return None
-
-            logger.info(f"Started {self.process_name} process with PID {pid}")
-            return pid
-
-        except Exception as e:
-            logger.error(f"Failed to start process: {e}")
-            return None
-        finally:
-            # Popen dup'd the fd into the child; the parent's handle is no
-            # longer needed and would otherwise leak.
-            if log_handle is not None:
-                log_handle.close()
-
-    def toggle(
-        self,
-        start: Callable[[], int],
-        try_only: bool = False,
-    ) -> int:
-        """
-        Toggle the managed process under lock.
-
-        If running, stop it. If not running, invoke ``start`` (also under the
-        lock) and return its exit code.
-
-        ``start`` MUST be non-blocking — it runs while the lock is held, so
-        long-running foreground work must NOT use this method. Use
-        :meth:`locked` directly and release the lock before doing the long
-        work.
-
-        Args:
-            start: Callback invoked when no process is running. Must return an
-                exit code and must not block on long-running work.
-            try_only: If True, fail immediately if the lock is held instead of
-                waiting.
-
-        Returns:
-            Exit code (0 for success). On stop failure returns 1. Raises
-            LockTimeout if the lock cannot be acquired.
-        """
-        with self.locked(try_only=try_only):
-            is_running, _ = self.is_running()
-            if is_running:
-                return 0 if self.stop_process() else 1
-            return start()
 
     def __enter__(self) -> Self:
         """Convenience equivalent to ``with self.locked():`` (no try_only)."""

@@ -1,4 +1,3 @@
-import collections
 import contextlib
 import os
 import sys
@@ -6,6 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from types import TracebackType
+from typing import Literal
 
 import numpy as np
 import pyaudio
@@ -53,23 +53,27 @@ class AudioSessionError(RuntimeError):
     """Raised when the microphone or audio stream can't be opened."""
 
 
+# Why AudioSession iteration ended. Only "stop_requested" means the user
+# asked; the others end a recording on their own.
+StopReason = Literal["stop_requested", "max_duration", "read_error"]
+
+
 class AudioSession:
     """Context manager that owns the PyAudio + stream lifecycle and yields audio chunks.
 
     Usage:
-        with AudioSession(threshold=200.0) as session:
+        with AudioSession(max_duration=600.0) as session:
             rate = session.sample_rate
             for chunk in session:
                 ...
 
-    Every chunk is yielded from the moment the stream opens — the threshold
-    does NOT gate what is sent (the server-side VAD filter strips leading
-    silence far more accurately than an RMS threshold can, and gating is how
-    utterance beginnings get clipped). The threshold's only job is deciding
-    when the utterance is over: iteration ends when (a) silence persists for
-    ``silence_duration`` seconds after speech has been detected, (b)
-    ``max_duration`` is reached, or (c) ``stop_event`` is set. Setting
-    ``threshold=0`` disables the silence auto-stop entirely.
+    Every chunk is yielded from the moment the stream opens; nothing here is
+    gated on level. Deciding what is speech belongs to the segmenter (where
+    to cut) and the server-side VAD filter (what to trim) — dropping "quiet"
+    audio at capture is exactly how utterance beginnings used to get clipped.
+
+    Iteration ends when ``stop_event`` is set, ``max_duration`` is reached, or
+    the stream fails; ``stop_reason`` says which.
     """
 
     FORMAT = pyaudio.paInt16
@@ -83,20 +87,12 @@ class AudioSession:
 
     def __init__(
         self,
-        threshold: float,
-        silence_duration: float | None = None,
         max_duration: float | None = None,
         chunk_size_ms: int = 30,
         stop_event: threading.Event | None = None,
         debug: bool = False,
     ):
         config = load_app_config()
-        self.threshold = threshold
-        self.silence_duration = (
-            silence_duration
-            if silence_duration is not None
-            else config.get("silence_duration", CODE_DEFAULTS["silence_duration"])
-        )
         self.max_duration = (
             max_duration
             if max_duration is not None
@@ -108,6 +104,7 @@ class AudioSession:
         self.debug = debug
 
         self.sample_rate = self.SAMPLE_RATE
+        self.stop_reason: StopReason | None = None
         self._chunk_samples = int(self.SAMPLE_RATE * chunk_size_ms / 1000)
         self._p: pyaudio.PyAudio | None = None
         self._stream: pyaudio.Stream | None = None
@@ -167,34 +164,18 @@ class AudioSession:
         if self._stream is None:
             raise RuntimeError("AudioSession must be used as a context manager")
 
-        no_vad_mode = self.threshold == 0
-        max_silent_chunks = int(self.silence_duration * self.SAMPLE_RATE / self._chunk_samples)
         max_total_chunks: float = (
             float("inf")
             if self.max_duration is None
             else int(self.max_duration * self.SAMPLE_RATE / self._chunk_samples)
         )
-
-        smoothing_window: int = 3
-        volume_history: collections.deque[float] = collections.deque(maxlen=smoothing_window)
-
-        speech_started = False
-        silent_chunks = 0
         total_chunks = 0
-
-        if no_vad_mode:
-            logger.info(
-                f"Streaming continuously without VAD (max duration: {self.max_duration}s)..."
-            )
-        else:
-            logger.info(
-                f"Recording (threshold {self.threshold:.1f}, stops after "
-                f"{self.silence_duration:.1f}s of post-speech silence)..."
-            )
+        logger.info(f"Recording (up to {self.max_duration:g}s)...")
 
         while total_chunks < max_total_chunks:
             if self.stop_event is not None and self.stop_event.is_set():
                 logger.info("Stop requested — finishing this recording...")
+                self.stop_reason = "stop_requested"
                 return
 
             try:
@@ -206,45 +187,13 @@ class AudioSession:
                         logger.debug("Input overflowed. Skipping frame.")
                     continue
                 logger.error(f"Error reading audio: {e}")
+                self.stop_reason = "read_error"
                 return
 
-            # Every chunk is streamed; the volume tracking below only decides
-            # when to stop.
             yield data
 
-            if no_vad_mode:
-                continue
-
-            audio_np = np.frombuffer(data, dtype=np.int16)
-            if audio_np.size == 0:
-                continue
-
-            volume = float(np.sqrt(np.mean(audio_np.astype(np.float32) ** 2)))
-            volume_history.append(volume)
-            smoothed = float(np.mean(volume_history))
-
-            if self.debug and total_chunks % max(1, int(1000 / self.chunk_size_ms) // 2) == 0:
-                silent_time = silent_chunks * self.chunk_size_ms / 1000.0
-                max_silent_time = max_silent_chunks * self.chunk_size_ms / 1000.0
-                logger.debug(
-                    f"Chunk {total_chunks}: Vol: {volume:.1f} Smooth: {smoothed:.1f} "
-                    f"(Thr: {self.threshold:.1f}) "
-                    f"Silent: {silent_time:.1f}s/{max_silent_time:.1f}s "
-                    f"Speech started: {speech_started}"
-                )
-
-            if smoothed > self.threshold:
-                if not speech_started and self.debug:
-                    logger.debug(f"Speech detected. Volume: {volume:.1f}")
-                speech_started = True
-                silent_chunks = 0
-            elif speech_started:
-                silent_chunks += 1
-                if silent_chunks > max_silent_chunks:
-                    if self.debug:
-                        logger.debug("Silence duration exceeded, stopping stream.")
-                    return
-
+        logger.info(f"Recording stopped: reached the {self.max_duration:g}s length limit.")
+        self.stop_reason = "max_duration"
         if self.debug:
             logger.debug(f"Streaming loop finished. Processed {total_chunks} chunks.")
 

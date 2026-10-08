@@ -224,6 +224,54 @@ def test_stream_per_request_language_overrides_default(
     assert backend.calls[-1]["language"] == "es"
 
 
+def test_stream_prompt_reaches_the_backend_after_dictionary_words(
+    live_server: tuple[str, FakeBackend],
+) -> None:
+    """Whisper keeps the last ~223 prompt tokens: the preceding transcript goes
+    last so a long dictionary is what gets truncated."""
+    socket_path, backend = live_server
+    model_server._service.dictionary_words = ["Talkat", "niri"]
+    audio = _pcm16_silence_frame()
+
+    with _client(socket_path) as c:
+        for metadata in ({"rate": 16000}, {"rate": 16000, "prompt": "The previous sentence."}):
+            line = json.dumps(metadata).encode("utf-8") + b"\n"
+            assert (
+                c.post("http://talkat/transcribe_stream", content=line + audio).status_code == 200
+            )
+
+    assert [call["initial_prompt"] for call in backend.calls] == [
+        "Talkat, niri",
+        "Talkat, niri The previous sentence.",
+    ]
+
+
+def test_stream_prompt_without_dictionary_and_length_cap(
+    live_server: tuple[str, FakeBackend],
+) -> None:
+    socket_path, backend = live_server
+    prompt = "x" * 5000
+    line = json.dumps({"rate": 16000, "prompt": prompt}).encode("utf-8") + b"\n"
+
+    with _client(socket_path) as c:
+        r = c.post("http://talkat/transcribe_stream", content=line + _pcm16_silence_frame())
+
+    assert r.status_code == 200
+    assert backend.calls[-1]["initial_prompt"] == prompt[-model_server._MAX_PROMPT_CHARS :]
+
+
+def test_stream_non_string_prompt_is_400(live_server: tuple[str, FakeBackend]) -> None:
+    socket_path, backend = live_server
+    line = json.dumps({"rate": 16000, "prompt": ["not", "a", "string"]}).encode("utf-8") + b"\n"
+
+    with _client(socket_path) as c:
+        r = c.post("http://talkat/transcribe_stream", content=line + _pcm16_silence_frame())
+
+    assert r.status_code == 400
+    assert "prompt" in r.json()["error"]
+    assert backend.calls == []
+
+
 def test_stream_empty_audio_short_circuits(
     live_server: tuple[str, FakeBackend],
 ) -> None:

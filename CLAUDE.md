@@ -86,9 +86,25 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
 5. **Configuration** (`config.py`)
    - Hierarchical config: defaults → `/etc/talkat/config.json` →
      `~/.config/talkat/config.json` → CLI args
-   - `save_app_config` persists **only** values that differ from
-     `CODE_DEFAULTS` and drops dead keys — never freeze defaults into the
-     user's file
+   - Validation is **per setting**: an invalid value falls back to the layer
+     below (ultimately the default) while the rest of its file still applies;
+     unknown keys are ignored with a did-you-mean (or the replacement, for
+     removed keys). Only a file that doesn't parse as a JSON object is skipped
+     whole, and nothing in a config file can make loading raise.
+     `load_app_config_with_issues` returns what was ignored and why;
+     `load_app_config` logs each issue once per process; `talkat doctor`
+     lists them
+   - Every `CODE_DEFAULTS` key needs a check in
+     `security.validate_json_config` — a test fails otherwise. Numbers must
+     be JSON numbers and take the type of their default (durations float,
+     counts int). Path settings expand `~` and must be absolute; symlinks and
+     `..` are fine (config is the user's own input — `validate_file_path`'s
+     traversal/symlink checks are for paths from outside)
+   - `update_user_config(updates)` (used by `calibrate`, `model use`) is a
+     read-modify-write of the user file alone: sets only its keys, removes a
+     key set back to its default, never copies `/etc` values or defaults in,
+     keeps the user's other entries, drops keys unknown to this version, and
+     refuses (`ConfigFileError`) to overwrite a file it can't parse
    - Model cache at `~/.cache/talkat/`
    - Transcripts at `~/.local/share/talkat/transcripts/`
    - PID and lock files at `$XDG_RUNTIME_DIR/talkat/` (typically `/run/user/$UID/talkat/`), with a fallback to `~/.cache/talkat/runtime/` when `XDG_RUNTIME_DIR` is unavailable
@@ -117,7 +133,7 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
 8. **Environment self-check** (`doctor.py`)
    - `talkat doctor`: install origin, PATH/systemd shadowing, server health
      + version skew, audio devices, ydotoold/clipboard/notification tooling,
-     focus/modifier guard status
+     focus/modifier guard status, config files and every setting they ignore
    - First thing to run when behavior looks stale or inconsistent
 
 ## Development Workflow
@@ -299,7 +315,7 @@ talkat/
 │   ├── model_manager.py  # talkat model {list,download,use}
 │   ├── file_processor.py # Audio file/batch transcription client
 │   ├── postprocess.py    # AIPP: LLM cleanup via OpenAI-compatible endpoint
-│   ├── config.py         # Layered config load/save (save prunes defaults)
+│   ├── config.py         # Layered config load (per-setting validation) + user-file updates
 │   ├── paths.py          # XDG paths + TALKAT_RUNTIME_DIR override
 │   ├── process_manager.py# flock-based lock, PID file, stopping a session
 │   ├── security.py       # Input validation, safe subprocess wrapper
@@ -328,7 +344,8 @@ talkat/
 ### Adding a New Model Backend
 1. Implement the `TranscriptionBackend` Protocol in `backends.py`
 2. Register it in `create_backend`
-3. Add configuration option in `config.py` (+ validation in `security.py`)
+3. Add configuration option in `config.py` (+ validation in `security.py` —
+   required: a test fails for any unvalidated key)
 4. Add model download logic
 
 ### Changing capture / silence-stop / segmentation behavior
@@ -489,6 +506,10 @@ Resolved former known-bugs (kept here so they aren't re-reported):
 - ~~Two dictation routes with different bugs~~ → one route (`run_dictation`);
   `long`/`start-long`/`stop-long`/`toggle-long` are gone, and with them the
   background-spawn machinery and `ProcessManager.toggle`
+- ~~One bad config value silently disabled the whole file; a symlinked or
+  `../` path setting crashed every command; `calibrate`/`model use` could
+  wipe the user's config~~ → per-setting validation that never raises, and
+  `update_user_config` read-modify-write
 
 Still true / watch out for:
 1. **Signal handling is subtle** — handlers never raise; they only set

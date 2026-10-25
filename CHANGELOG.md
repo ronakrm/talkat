@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-10-24
+
+Security update. certifi goes from 2022.12.7 to 2026.10.23, which no longer
+trusts the compromised eMudhra intermediate CAs
+(https://emudhra.we-have-a-problem.com/). Restart the service after upgrading.
+
 ## [2.1.0] - 2026-10-08
 
 Typing is about five times faster, with the pace now configurable, and

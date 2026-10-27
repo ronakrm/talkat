@@ -148,8 +148,30 @@ def test_each_piece_is_appended_to_the_transcript_as_it_arrives(
     rc, _ = _run(tmp_path)
 
     assert rc == 0
-    assert seen_on_disk == ["hello "], "pieces must hit the disk immediately, not at session end"
-    assert output.read_text(encoding="utf-8") == "hello this is talkat goodbye "
+    assert seen_on_disk == ["hello"], "pieces must hit the disk immediately, not at session end"
+    assert output.read_text(encoding="utf-8") == "hello this is talkat goodbye"
+
+
+def test_sentences_split_by_a_pause_are_mended_on_disk(clean_pid_files, to_file_env, tmp_path):
+    to_file_env["script"] = ["handing off to...", "...the operator. Then...", "Done."]
+
+    rc, output = _run(tmp_path)
+
+    assert rc == 0
+    assert output.read_text(encoding="utf-8") == "handing off to the operator. Then... Done."
+
+
+def test_appending_to_an_earlier_transcript_starts_a_word_apart(
+    clean_pid_files, to_file_env, tmp_path
+):
+    output = tmp_path / "transcript.txt"
+    output.write_text("earlier session.", encoding="utf-8")
+    to_file_env["script"] = ["hello"]
+
+    rc, _ = _run(tmp_path)
+
+    assert rc == 0
+    assert output.read_text(encoding="utf-8") == "earlier session. hello"
 
 
 def test_silent_pieces_are_not_written(clean_pid_files, to_file_env, tmp_path):
@@ -169,7 +191,7 @@ def test_untranscribed_piece_leaves_a_marker_and_fails_the_run(
     rc, output = _run(tmp_path)
 
     assert rc == 1
-    assert output.read_text(encoding="utf-8") == f"before {MARKER} after "
+    assert output.read_text(encoding="utf-8") == f"before {MARKER} after"
     assert any("couldn't be transcribed" in n for n in to_file_env["notes"])
 
 

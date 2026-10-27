@@ -48,6 +48,10 @@ Talkat is a voice-to-text dictation system for Wayland Linux compositors. It run
      after 3 s, else the quietest moment before 30 s), and a background
      thread transcribes them in order — each POST carries the previous
      segment's text as `prompt` for continuity
+   - `TranscriptJoiner` mends the seams: Whisper marks a mid-sentence cut
+     with `...` on both sides; the leading one is dropped, the trailing one
+     held until the next segment shows the sentence went on (it starts with
+     `...` or lowercase) — otherwise kept. Ellipses inside a segment stay
    - Types each segment as soon as it's transcribed (typed as you talk);
      AIPP, `-o`, `--to-file`, and `output_mode: clipboard` deliver once at
      the end (`--to-file` appends as it goes and clipboards at the end)

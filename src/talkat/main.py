@@ -27,7 +27,7 @@ from .paths import TRANSCRIPT_DIR
 from .process_manager import ProcessManager
 from .record import StopReason, calibrate_microphone
 from .security import safe_subprocess_run, sanitize_text_for_typing
-from .session import DictationSession, SegmentResult, SessionOutcome
+from .session import DictationSession, SegmentResult, SessionOutcome, TranscriptJoiner
 
 logger = get_logger(__name__)
 
@@ -249,6 +249,14 @@ def run_dictation(
 
     failure_announced = False
     consecutive_failures = 0
+    # One joiner for what's typed and what's appended, so both mend the same seams.
+    joiner = TranscriptJoiner()
+
+    def deliver(piece: str, transcribed: bool = True) -> None:
+        if transcript_file is not None:
+            transcript_file.add(piece)
+        if typist is not None:
+            typist.add(piece, transcribed=transcribed)
 
     def on_result(result: SegmentResult) -> None:
         nonlocal failure_announced, consecutive_failures
@@ -272,10 +280,7 @@ def run_dictation(
             consecutive_failures = 0
             if result.text:
                 logger.info(f"Recognized: {result.text}")
-        if transcript_file is not None:
-            transcript_file.add(result.text)
-        if typist is not None:
-            typist.add(result.text, transcribed=not result.failed)
+        deliver(joiner.add(result.text), transcribed=not result.failed)
 
     session_start = time.monotonic()
     with TranscriptionClient(config) as client:
@@ -294,6 +299,7 @@ def run_dictation(
             idle_notify_interval=idle_notify_interval,
             on_idle=_announce_idle,
         )
+    deliver(joiner.finish())
 
     if outcome.audio_error is not None:
         logger.error(str(outcome.audio_error))
@@ -363,12 +369,15 @@ class _TranscriptFile:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # Appending to an earlier session's file: start a word apart from it.
+        self._separator = " " if path.stat().st_size else ""
 
     def add(self, piece: str) -> None:
         if not piece:
             return
         with open(self.path, "a", encoding="utf-8") as f:
-            f.write(piece + " ")
+            f.write(self._separator + piece)
+        self._separator = ""
 
     def read(self) -> str:
         try:
@@ -476,6 +485,8 @@ class _Typist:
     Once typing has to stop — focus moved, a modifier key stayed held, a
     second stop, ydotool failed, or a piece couldn't be transcribed — nothing
     more is typed, and :meth:`finish` puts everything untyped on the clipboard.
+    Pieces come from a :class:`~talkat.session.TranscriptJoiner`, separator
+    included, and are typed as given.
     """
 
     def __init__(
@@ -491,11 +502,9 @@ class _Typist:
     def add(self, piece: str, transcribed: bool = True) -> None:
         # No length cap: the recording limit already bounds a transcript, and
         # sanitize's default cap would silently drop the end of a long one.
-        piece = sanitize_text_for_typing(piece, max_length=len(piece)).strip()
-        if not piece:
+        piece = sanitize_text_for_typing(piece, max_length=len(piece))
+        if not piece.strip():
             return
-        if self._typed or self._untyped:
-            piece = " " + piece
         if not transcribed and self.stop_reason is None:
             # Typing on past a gap would leave text with a hole in it.
             self.stop_reason = UNTRANSCRIBED_NOTICE

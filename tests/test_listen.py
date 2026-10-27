@@ -238,6 +238,24 @@ def test_each_piece_is_typed_as_soon_as_it_arrives(clean_pid_files, listen_env):
     assert _typed_text(calls) == "First sentence. Second one."
 
 
+def test_a_sentence_split_by_a_pause_is_typed_whole(clean_pid_files, listen_env):
+    from talkat.main import run_dictation
+
+    calls = listen_env["subprocess_calls"]
+    typed_between: list[str] = []
+    listen_env["script"] = [
+        "handing off to...",
+        lambda _session: typed_between.append(_typed_text(calls)),
+        "...the operator. And then...",
+    ]
+
+    assert run_dictation() == 0
+    # The ellipsis waits for the next piece, which shows the sentence went on.
+    assert typed_between == ["handing off to"]
+    # The last one has no next piece: the speaker trailed off as they stopped.
+    assert _typed_text(calls) == "handing off to the operator. And then..."
+
+
 def test_silent_pieces_add_no_text(clean_pid_files, listen_env):
     from talkat.main import run_dictation
 

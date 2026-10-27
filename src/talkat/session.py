@@ -20,6 +20,7 @@ ends capture, and everything recorded is still transcribed and delivered.
 """
 
 import queue
+import re
 import threading
 import time
 import wave
@@ -48,6 +49,51 @@ PROMPT_CHARS = 200
 ABORT_GRACE_S = 0.5
 _POLL_S = 0.1
 
+_LEADING_ELLIPSIS = re.compile(r"^(?:\.{3,}|…)\s*")
+_TRAILING_ELLIPSIS = re.compile(r"\s*(\.{3,}|…)$")
+
+
+class TranscriptJoiner:
+    """Joins segment texts into one transcript, mending sentences cut at a pause.
+
+    Each segment is decoded on its own, so Whisper marks a sentence the cut
+    split from both sides: "act somewhat of a..." then "...guide." A leading
+    ellipsis is dropped — the text it trails from is right there. A trailing
+    one is held back until the next piece shows whether the sentence went
+    on: it did if that piece began with an ellipsis or a lowercase letter.
+    Otherwise the speaker trailed off, and the ellipsis stays.
+
+    :meth:`add` returns exactly what to append, separator included;
+    :meth:`finish` returns the ellipsis still held back, if any.
+    """
+
+    def __init__(self) -> None:
+        self._started = False
+        self._held = ""
+
+    def add(self, text: str) -> str:
+        text = text.strip()
+        body = _LEADING_ELLIPSIS.sub("", text)
+        continues = body != text or body[:1].islower()
+        tail = _TRAILING_ELLIPSIS.search(body)
+        if tail is not None:
+            body = body[: tail.start()]
+        if not body:
+            return ""
+        if not self._started:
+            separator = ""
+        elif self._held and not continues:
+            separator = self._held + " "
+        else:
+            separator = " "
+        self._started = True
+        self._held = tail.group(1) if tail is not None else ""
+        return separator + body
+
+    def finish(self) -> str:
+        held, self._held = self._held, ""
+        return held
+
 
 @dataclass(frozen=True)
 class SegmentResult:
@@ -72,7 +118,8 @@ class SessionOutcome:
 
     @property
     def text(self) -> str:
-        return " ".join(r.text for r in self.results if r.text)
+        joiner = TranscriptJoiner()
+        return "".join(joiner.add(r.text) for r in self.results) + joiner.finish()
 
     @property
     def failures(self) -> list[SegmentResult]:

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-10-27
+
+### Fixed
+- A sentence split by a pause no longer comes out as "somewhat of a...
+  ...guide". The dots Whisper puts on both sides of a mid-sentence cut are
+  dropped; dots where you actually trailed off, or inside one segment, stay.
+
 ## [2.1.1] - 2026-10-24
 
 Security update. certifi goes from 2022.12.7 to 2026.10.23, which no longer
